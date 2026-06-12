@@ -29,10 +29,10 @@ function layerStyle(period, overlay) {
   if (overlay === 'tiles') {
     return {
       color: period.color,
-      weight: 1,
+      weight: 0.5,
       fillColor: period.color,
-      fillOpacity: 0.28,
-      opacity: 0.6
+      fillOpacity: 0.24,
+      opacity: 0.22
     };
   }
 
