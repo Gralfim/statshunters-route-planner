@@ -2,7 +2,7 @@ import argparse
 
 import uvicorn
 
-from api import app, get_activities, get_tile_database
+from api import app, get_activities, get_period_tile_database, period_definitions
 from cluster import find_largest_cluster
 from frontier import frontier_tiles
 from square import find_largest_square
@@ -10,15 +10,20 @@ from square import find_largest_square
 
 def print_stats():
     activities = get_activities()
-    tile_db = get_tile_database()
-    cluster = find_largest_cluster(tile_db.keys())
-    square = find_largest_square(tile_db.keys())
 
     print("Activities:", len(activities))
-    print("Run tiles:", len(tile_db))
-    print("Frontier tiles:", len(frontier_tiles(tile_db)))
-    print("Largest cluster:", cluster["size"])
-    print("Largest square:", square["size"])
+    for key, period in period_definitions().items():
+        tile_db = get_period_tile_database(key)
+        cluster = find_largest_cluster(tile_db.keys())
+        square = find_largest_square(tile_db.keys())
+        start = period["start_date"].isoformat() if period["start_date"] else "beginning"
+        end = period["end_date"].isoformat()
+
+        print(f"\n{period['label']} ({start} - {end})")
+        print("Run tiles:", len(tile_db))
+        print("Frontier tiles:", len(frontier_tiles(tile_db)))
+        print("Largest cluster:", cluster["size"])
+        print("Largest square:", square["size"])
 
 
 def parse_args():

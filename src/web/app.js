@@ -5,81 +5,127 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '&copy; OpenStreetMap contributors'
 }).addTo(map);
 
-const layerConfig = {
-  visited: {
-    url: '/api/tiles',
-    style: { color: '#1f6feb', weight: 1, fillColor: '#58a6ff', fillOpacity: 0.28 }
-  },
-  frontier: {
-    url: '/api/frontier',
-    style: { color: '#d97706', weight: 1, fillColor: '#f59e0b', fillOpacity: 0.32 }
-  },
-  cluster: {
-    url: '/api/cluster',
-    style: { color: '#047857', weight: 1, fillColor: '#10b981', fillOpacity: 0.38 }
-  },
-  square: {
-    url: '/api/square',
-    style: { color: '#be123c', weight: 1, fillColor: '#fb7185', fillOpacity: 0.42 }
-  }
+const periodOrder = ['all', 'year', 'recent'];
+const overlayGroups = {
+  tiles: L.layerGroup().addTo(map),
+  cluster: L.layerGroup().addTo(map),
+  square: L.layerGroup().addTo(map)
 };
-
-const layers = {};
+const layerCache = {};
+let periods = [];
 
 function popupText(feature) {
   const p = feature.properties;
+  if (p.kind) {
+    return `${p.period} ${p.kind}<br>Size: ${p.size}`;
+  }
+
   const visits = p.visit_count ? `<br>Visits: ${p.visit_count}` : '';
   const dates = p.first_visit ? `<br>${p.first_visit} - ${p.last_visit}` : '';
   return `Tile ${p.x}, ${p.y}${visits}${dates}`;
 }
 
-async function loadLayer(name) {
-  if (layers[name]) return layers[name];
+function layerStyle(period, overlay) {
+  if (overlay === 'tiles') {
+    return {
+      color: period.color,
+      weight: 1,
+      fillColor: period.color,
+      fillOpacity: 0.28,
+      opacity: 0.6
+    };
+  }
 
-  const cfg = layerConfig[name];
-  const data = await fetch(cfg.url).then(r => r.json());
-  layers[name] = L.geoJSON(data, {
-    style: cfg.style,
+  return {
+    color: period.color,
+    weight: overlay === 'square' ? 3 : 2,
+    fillOpacity: 0,
+    opacity: overlay === 'square' ? 0.95 : 0.75,
+    dashArray: overlay === 'square' ? null : '5 4'
+  };
+}
+
+async function loadLayer(periodKey, overlay) {
+  const cacheKey = `${periodKey}:${overlay}`;
+  if (layerCache[cacheKey]) return layerCache[cacheKey];
+
+  const period = periods.find(p => p.key === periodKey);
+  const data = await fetch(`/api/periods/${periodKey}/${overlay}`).then(r => r.json());
+  layerCache[cacheKey] = L.geoJSON(data, {
+    style: layerStyle(period, overlay),
     onEachFeature: (feature, layer) => layer.bindPopup(popupText(feature))
   });
 
-  return layers[name];
+  return layerCache[cacheKey];
 }
 
-async function toggleLayer(name, checked) {
-  const layer = await loadLayer(name);
-  if (checked) {
-    layer.addTo(map);
-    if (name === 'visited') map.fitBounds(layer.getBounds(), { padding: [24, 24] });
+async function drawOverlay(overlay) {
+  overlayGroups[overlay].clearLayers();
+
+  for (const periodKey of periodOrder) {
+    const layer = await loadLayer(periodKey, overlay);
+    overlayGroups[overlay].addLayer(layer);
+  }
+}
+
+function renderStats() {
+  const stats = document.querySelector('#stats');
+  stats.innerHTML = periods.map(period => `
+    <section class="period">
+      <header><span class="swatch" style="background:${period.color}"></span>${period.label}</header>
+      <div class="metrics">
+        <div>
+          <div class="label">Tiles</div>
+          <div class="value">${period.run_tiles}</div>
+        </div>
+        <div>
+          <div class="label">Cluster</div>
+          <div class="value">${period.largest_cluster}</div>
+        </div>
+        <div>
+          <div class="label">Square</div>
+          <div class="value">${period.largest_square}x</div>
+        </div>
+      </div>
+      <div class="label">${period.start_date || 'zacatek'} - ${period.end_date}</div>
+    </section>
+  `).join('');
+}
+
+async function drawCheckedOverlays() {
+  for (const overlay of Object.keys(overlayGroups)) {
+    const input = document.querySelector(`[data-overlay="${overlay}"]`);
+    if (input.checked) await drawOverlay(overlay);
+  }
+}
+
+async function fitToAllTiles(summary) {
+  const allTiles = await loadLayer('all', 'tiles');
+  if (allTiles.getBounds().isValid()) {
+    map.fitBounds(allTiles.getBounds(), { padding: [24, 24] });
   } else {
-    map.removeLayer(layer);
+    map.setView([summary.home.lat, summary.home.lon], 11);
   }
 }
 
 async function loadSummary() {
   const summary = await fetch('/api/summary').then(r => r.json());
-  const stats = document.querySelector('#stats');
-  stats.innerHTML = [
-    ['Run tiles', summary.run_tiles],
-    ['Frontier', summary.frontier_tiles],
-    ['Cluster', summary.largest_cluster],
-    ['Square', `${summary.largest_square} x ${summary.largest_square}`]
-  ].map(([label, value]) => `
-    <div class="stat">
-      <div class="label">${label}</div>
-      <div class="value">${value}</div>
-    </div>
-  `).join('');
+  periods = periodOrder.map(key => summary.periods.find(period => period.key === key));
 
-  map.setView([summary.home.lat, summary.home.lon], 11);
+  renderStats();
+  await drawCheckedOverlays();
+  await fitToAllTiles(summary);
 }
 
-document.querySelectorAll('[data-layer]').forEach(input => {
-  input.addEventListener('change', event => {
-    toggleLayer(event.target.dataset.layer, event.target.checked);
+document.querySelectorAll('[data-overlay]').forEach(input => {
+  input.addEventListener('change', async event => {
+    const overlay = event.target.dataset.overlay;
+    if (event.target.checked) {
+      await drawOverlay(overlay);
+    } else {
+      overlayGroups[overlay].clearLayers();
+    }
   });
 });
 
 loadSummary();
-toggleLayer('visited', true);
-toggleLayer('frontier', true);

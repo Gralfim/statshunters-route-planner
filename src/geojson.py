@@ -1,5 +1,8 @@
 import math
 
+from shapely.geometry import Polygon, mapping
+from shapely.ops import unary_union
+
 
 TILE_ZOOM = 14
 
@@ -45,3 +48,15 @@ def tile_feature(tile, props=None):
 
 def feature_collection(features):
     return {"type": "FeatureCollection", "features": list(features)}
+
+
+def tile_outline_feature_collection(tiles, props=None):
+    polygons = [Polygon(tile_polygon(tile)) for tile in tiles]
+    if not polygons:
+        return feature_collection([])
+
+    return feature_collection([{
+        "type": "Feature",
+        "properties": props or {},
+        "geometry": mapping(unary_union(polygons)),
+    }])

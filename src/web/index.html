@@ -19,10 +19,13 @@ html,body,#map{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI
   padding:12px;
 }
 #panel h1{font-size:16px;line-height:1.2;margin:0 0 10px}
-#stats{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
-.stat{border:1px solid #e5e9ef;border-radius:6px;padding:8px}
-.label{font-size:11px;color:#53606f;text-transform:uppercase}
-.value{font-size:18px;font-weight:700;margin-top:2px}
+#stats{display:grid;gap:8px;margin-bottom:12px}
+.period{border:1px solid #e5e9ef;border-radius:6px;padding:8px}
+.period header{display:flex;align-items:center;gap:8px;font-weight:700;margin-bottom:6px}
+.swatch{width:14px;height:14px;border-radius:3px;display:inline-block}
+.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.label{font-size:10px;color:#53606f;text-transform:uppercase}
+.value{font-size:16px;font-weight:700;margin-top:2px}
 #layers{display:grid;gap:6px}
 #layers label{display:flex;align-items:center;gap:8px;font-size:14px}
 </style>
@@ -33,10 +36,9 @@ html,body,#map{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI
   <h1>StatsHunters Route Planner</h1>
   <div id="stats"></div>
   <div id="layers">
-    <label><input type="checkbox" data-layer="visited" checked> Navstivene tiles</label>
-    <label><input type="checkbox" data-layer="frontier" checked> Frontier</label>
-    <label><input type="checkbox" data-layer="cluster"> Nejvetsi cluster</label>
-    <label><input type="checkbox" data-layer="square"> Nejvetsi square</label>
+    <label><input type="checkbox" data-overlay="tiles" checked> Tiles</label>
+    <label><input type="checkbox" data-overlay="cluster" checked> Cluster obrysy</label>
+    <label><input type="checkbox" data-overlay="square" checked> Square obrysy</label>
   </div>
 </aside>
 <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
