@@ -1,0 +1,22 @@
+# Python
+__pycache__
+.pyc
+.pyo
+.pyd
+.Python
+
+# Virtuální prostředí
+.venv
+venv
+env
+
+# Anime model — lokální data
+data
+
+# IDE
+.vscodesettings.json
+.idea
+
+# OS
+.DS_Store
+Thumbs.db
