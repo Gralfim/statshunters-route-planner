@@ -5,11 +5,40 @@
 <title>StatsHunters Planner</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css">
 <style>
-html,body,#map{height:100%;margin:0}
+html,body,#map{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,sans-serif}
+#panel{
+  position:absolute;
+  top:12px;
+  right:12px;
+  z-index:1000;
+  width:min(320px,calc(100vw - 24px));
+  background:#fff;
+  border:1px solid #d7dde3;
+  border-radius:8px;
+  box-shadow:0 8px 24px rgba(26,32,44,.18);
+  padding:12px;
+}
+#panel h1{font-size:16px;line-height:1.2;margin:0 0 10px}
+#stats{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+.stat{border:1px solid #e5e9ef;border-radius:6px;padding:8px}
+.label{font-size:11px;color:#53606f;text-transform:uppercase}
+.value{font-size:18px;font-weight:700;margin-top:2px}
+#layers{display:grid;gap:6px}
+#layers label{display:flex;align-items:center;gap:8px;font-size:14px}
 </style>
 </head>
 <body>
 <div id="map"></div>
+<aside id="panel">
+  <h1>StatsHunters Route Planner</h1>
+  <div id="stats"></div>
+  <div id="layers">
+    <label><input type="checkbox" data-layer="visited" checked> Navstivene tiles</label>
+    <label><input type="checkbox" data-layer="frontier" checked> Frontier</label>
+    <label><input type="checkbox" data-layer="cluster"> Nejvetsi cluster</label>
+    <label><input type="checkbox" data-layer="square"> Nejvetsi square</label>
+  </div>
+</aside>
 <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 <script src="app.js"></script>
 </body>
