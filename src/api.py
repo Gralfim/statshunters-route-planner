@@ -10,6 +10,7 @@ from cluster import find_largest_cluster
 from frontier import frontier_tiles
 from geojson import feature_collection, tile_feature, tile_outline_feature_collection
 from load import load_activities
+from scoring import find_tile_opportunities
 from square import find_largest_square
 from tiles import build_tile_database
 
@@ -166,6 +167,35 @@ def square_geojson(period_key: str):
     return tile_outline_feature_collection(
         square["tiles"],
         {"kind": "square", "period": period_key, "size": square["size"]},
+    )
+
+
+@lru_cache
+def get_opportunities():
+    return find_tile_opportunities({
+        "all": get_period_tile_database("all"),
+        "year": get_period_tile_database("year"),
+        "recent": get_period_tile_database("recent"),
+    })
+
+
+@app.get("/api/opportunities")
+def opportunities_geojson():
+    return feature_collection(
+        tile_feature(opportunity["tile"], {
+            "kind": "opportunity",
+            "x": opportunity["tile"][0],
+            "y": opportunity["tile"][1],
+            "rank": opportunity["rank"],
+            "score": opportunity["score"],
+            "priority": opportunity["priority"],
+            "top_reason": opportunity["top_reason"],
+            "visited_periods": opportunity["visited_periods"],
+            "missing_periods": opportunity["missing_periods"],
+            "reasons": opportunity["reasons"],
+            "gains": opportunity["gains"],
+        })
+        for opportunity in get_opportunities()
     )
 
 

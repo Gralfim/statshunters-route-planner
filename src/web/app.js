@@ -8,6 +8,7 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
 const periodOrder = ['all', 'year', 'recent'];
 const overlayGroups = {
   tiles: L.layerGroup().addTo(map),
+  opportunities: L.layerGroup().addTo(map),
   cluster: L.layerGroup().addTo(map),
   square: L.layerGroup().addTo(map)
 };
@@ -16,6 +17,22 @@ let periods = [];
 
 function popupText(feature) {
   const p = feature.properties;
+  if (p.kind === 'opportunity') {
+    const visited = p.visited_periods || {};
+    const visitStatus = [
+      `Celkem: ${visited.all ? 'ano' : 'ne'}`,
+      `Letos: ${visited.year ? 'ano' : 'ne'}`,
+      `3 mesice: ${visited.recent ? 'ano' : 'ne'}`
+    ].join('<br>');
+    const reasons = (p.reasons || [])
+      .map(reason => {
+        const gain = reason.gain && reason.gain > 1 ? ` (+${reason.gain})` : '';
+        return `${reason.priority}. ${reason.label}${gain}`;
+      })
+      .join('<br>');
+    return `#${p.rank} tile ${p.x}, ${p.y}<br>${p.top_reason}<br>Score: ${p.score}<br><br>${visitStatus}<br><br>${reasons}`;
+  }
+
   if (p.kind) {
     return `${p.period} ${p.kind}<br>Size: ${p.size}`;
   }
@@ -45,6 +62,33 @@ function layerStyle(period, overlay) {
   };
 }
 
+function opportunityStyle(feature) {
+  const priority = feature.properties.priority;
+  const visited = feature.properties.visited_periods || {};
+  const fillOpacity = Math.max(0.22, 0.7 - (priority - 1) * 0.06);
+  const fillColor = visited.all ? '#06b6d4' : '#f59e0b';
+
+  return {
+    color: '#111827',
+    weight: priority <= 3 ? 1.5 : 0.8,
+    fillColor,
+    fillOpacity,
+    opacity: priority <= 3 ? 0.85 : 0.45
+  };
+}
+
+async function loadOpportunityLayer() {
+  if (layerCache.opportunities) return layerCache.opportunities;
+
+  const data = await fetch('/api/opportunities').then(r => r.json());
+  layerCache.opportunities = L.geoJSON(data, {
+    style: opportunityStyle,
+    onEachFeature: (feature, layer) => layer.bindPopup(popupText(feature))
+  });
+
+  return layerCache.opportunities;
+}
+
 async function loadLayer(periodKey, overlay) {
   const cacheKey = `${periodKey}:${overlay}`;
   if (layerCache[cacheKey]) return layerCache[cacheKey];
@@ -61,6 +105,12 @@ async function loadLayer(periodKey, overlay) {
 
 async function drawOverlay(overlay) {
   overlayGroups[overlay].clearLayers();
+
+  if (overlay === 'opportunities') {
+    const layer = await loadOpportunityLayer();
+    overlayGroups[overlay].addLayer(layer);
+    return;
+  }
 
   for (const periodKey of periodOrder) {
     const layer = await loadLayer(periodKey, overlay);
