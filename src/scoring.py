@@ -1,7 +1,11 @@
+from datetime import date
+
 from cluster import find_largest_cluster
 from geojson import tile_xy
 from square import find_largest_square
 
+
+STALENESS_CAP_DAYS = 3 * 365
 
 PRIORITIES = [
     ("all_square", "Zvetsi celkovy max square", "all", "square"),
@@ -18,6 +22,15 @@ PRIORITIES = [
 
 def _tile_set(tile_db):
     return {tile_xy(tile) for tile in tile_db}
+
+
+def _staleness_bonus(days_since_visit):
+    """Bonus 0..1 za stari posledni navstevy — cisty prinos tile, zadne naklady
+    na cestu. Drzi se pod 2, coz je minimalni rozestup mezi ruznymi kombinacemi
+    priorit, takze meni poradi jen mezi tiles se shodnymi prioritami."""
+    if days_since_visit is None:
+        return 1.0
+    return min(max(days_since_visit, 0) / STALENESS_CAP_DAYS, 1.0)
 
 
 def _period_baseline(tiles):
@@ -77,7 +90,12 @@ def _measure_gain(tile, baseline, metric):
     raise ValueError(f"Unknown metric: {metric}")
 
 
-def find_tile_opportunities(period_tile_dbs):
+def find_tile_opportunities(period_tile_dbs, today=None):
+    today = today or date.today()
+    last_visits = {
+        tile_xy(tile): rec["last_visit"]
+        for tile, rec in period_tile_dbs["all"].items()
+    }
     period_tiles = {
         period: _tile_set(tile_db)
         for period, tile_db in period_tile_dbs.items()
@@ -119,12 +137,17 @@ def find_tile_opportunities(period_tile_dbs):
         if not reasons:
             continue
 
+        last_visit = last_visits.get(tile)
+        days_since_visit = (today - last_visit.date()).days if last_visit else None
+
         first_reason = reasons[0]
         opportunities.append({
             "tile": tile,
-            "score": score,
+            "score": round(score + _staleness_bonus(days_since_visit), 3),
             "priority": first_reason["priority"],
             "top_reason": first_reason["label"],
+            "last_visit": last_visit.date().isoformat() if last_visit else None,
+            "days_since_visit": days_since_visit,
             "visited_periods": visited_periods,
             "missing_periods": missing_periods,
             "reasons": reasons,

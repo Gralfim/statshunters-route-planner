@@ -4,3 +4,7 @@ home:
   lon: 14.4188
 target_distance_km: 15
 distance_tolerance_km: 3
+statshunters:
+  # https://www.statshunters.com/share/<kod> nebo jen <kod>;
+  # lze zadat i pres promennou prostredi STATSHUNTERS_SHARE_LINK
+  share_link: "https://www.statshunters.com/share/6afcfce64de5"

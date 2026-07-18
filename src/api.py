@@ -12,6 +12,7 @@ from geojson import feature_collection, tile_feature, tile_outline_feature_colle
 from load import load_activities
 from scoring import find_tile_opportunities
 from square import find_largest_square
+from statshunters import resolve_share_link, sync_activities
 from tiles import build_tile_database
 
 
@@ -54,19 +55,19 @@ def period_definitions(today=None):
             "label": "Celkem",
             "start_date": None,
             "end_date": today,
-            "color": "#4f46e5",
+            "color": "#2a78d6",
         },
         "year": {
             "label": f"Rok {today.year}",
             "start_date": date(today.year, 1, 1),
             "end_date": today,
-            "color": "#059669",
+            "color": "#eda100",
         },
         "recent": {
             "label": "Posledni 3 mesice",
             "start_date": _subtract_months(today, 3),
             "end_date": today,
-            "color": "#dc2626",
+            "color": "#e34948",
         },
     }
 
@@ -190,6 +191,8 @@ def opportunities_geojson():
             "score": opportunity["score"],
             "priority": opportunity["priority"],
             "top_reason": opportunity["top_reason"],
+            "last_visit": opportunity["last_visit"],
+            "days_since_visit": opportunity["days_since_visit"],
             "visited_periods": opportunity["visited_periods"],
             "missing_periods": opportunity["missing_periods"],
             "reasons": opportunity["reasons"],
@@ -197,6 +200,29 @@ def opportunities_geojson():
         })
         for opportunity in get_opportunities()
     )
+
+
+@app.post("/api/sync")
+def sync_data():
+    share_link = resolve_share_link(get_config())
+    if not share_link:
+        raise HTTPException(
+            status_code=400,
+            detail="StatsHunters share link neni nastaven (config.yaml: statshunters.share_link)",
+        )
+
+    try:
+        result = sync_activities(DATA_DIR, share_link)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(status_code=502, detail=f"Stazeni ze StatsHunters selhalo: {exc}")
+
+    get_activities.cache_clear()
+    get_tile_database.cache_clear()
+    get_period_tile_database.cache_clear()
+    get_opportunities.cache_clear()
+    return result
 
 
 @app.get("/api/tiles")
