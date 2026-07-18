@@ -90,6 +90,77 @@ def _measure_gain(tile, baseline, metric):
     raise ValueError(f"Unknown metric: {metric}")
 
 
+def build_route_context(period_tile_dbs, today=None):
+    """Predpocitane podklady pro vyhodnocovani prinosu mnoziny tiles."""
+    period_tiles = {
+        period: _tile_set(tile_db)
+        for period, tile_db in period_tile_dbs.items()
+    }
+    return {
+        "period_tiles": period_tiles,
+        "baselines": {
+            period: _period_baseline(tiles)
+            for period, tiles in period_tiles.items()
+        },
+        "last_visits": {
+            tile_xy(tile): rec["last_visit"]
+            for tile, rec in period_tile_dbs["all"].items()
+        },
+        "today": today or date.today(),
+    }
+
+
+def evaluate_tile_set(tiles, context):
+    """Spolecny prinos navstevy cele mnoziny tiles v jednom behu.
+
+    Zisky square/cluster se pocitaji s celou mnozinou najednou - nejsou aditivni
+    pres jednotlive tiles (skupina sousedu muze zvetsit square, i kdyz zadny z
+    nich samostatne ne). Vaha priority x velikost zisku + staleness bonusy.
+    Square se vazi PLOCHOU (side^2 - baseline^2): rust strany je vzacny a bez
+    toho by ho snadny rust clusteru o par tiles vzdy prebil, coz obraci poradi
+    priorit. V gains zustava rozdil strany (pro zobrazeni).
+    """
+    tiles = {tile_xy(tile) for tile in tiles}
+    total = 0.0
+    gains = {}
+
+    for index, (key, _label, period, kind) in enumerate(PRIORITIES):
+        existing = context["period_tiles"][period]
+        baseline = context["baselines"][period]
+
+        if kind == "unvisited":
+            gain = sum(1 for tile in tiles if tile not in existing)
+            contribution = gain
+        else:
+            added = tiles - existing
+            gain = 0
+            contribution = 0
+            if added:
+                expanded = existing | added
+                if kind == "cluster":
+                    gain = find_largest_cluster(expanded)["size"] - baseline["cluster_size"]
+                    contribution = gain
+                else:
+                    new_side = find_largest_square(expanded)["size"]
+                    gain = new_side - baseline["square_size"]
+                    contribution = new_side ** 2 - baseline["square_size"] ** 2
+
+        gains[key] = gain
+        total += 2 ** (len(PRIORITIES) - index) * contribution
+
+    staleness = 0.0
+    for tile in tiles:
+        last_visit = context["last_visits"].get(tile)
+        days = (context["today"] - last_visit.date()).days if last_visit else None
+        staleness += _staleness_bonus(days)
+
+    return {
+        "total": round(total + staleness, 3),
+        "gains": gains,
+        "staleness": round(staleness, 3),
+    }
+
+
 def find_tile_opportunities(period_tile_dbs, today=None):
     today = today or date.today()
     last_visits = {

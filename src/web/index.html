@@ -12,6 +12,8 @@ html,body,#map{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI
   right:12px;
   z-index:1000;
   width:min(320px,calc(100vw - 24px));
+  max-height:calc(100vh - 24px);
+  overflow-y:auto;
   background:#fff;
   border:1px solid #d7dde3;
   border-radius:8px;
@@ -30,6 +32,15 @@ html,body,#map{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI
 #layers label{display:flex;align-items:center;gap:8px;font-size:14px}
 #legend{display:grid;gap:4px;margin-top:10px;font-size:12px;color:#53606f}
 #legend .swatch{width:10px;height:10px;margin-right:4px}
+#route{margin-top:12px;border-top:1px solid #e5e9ef;padding-top:10px;display:grid;gap:6px}
+#route .route-inputs{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+#route .route-inputs label{display:grid;gap:2px;font-size:11px;color:#53606f;text-transform:uppercase}
+#route input{padding:5px 6px;border:1px solid #d7dde3;border-radius:4px;font-size:14px;width:100%;box-sizing:border-box}
+#plan{padding:8px;border:0;border-radius:6px;background:#111827;color:#fff;font-weight:600;cursor:pointer}
+#plan:disabled{background:#9aa2af;cursor:wait}
+#gpx{padding:7px;border:1px solid #111827;border-radius:6px;background:#fff;color:#111827;font-weight:600;cursor:pointer}
+#route-status,#route-start{font-size:12px;color:#53606f}
+#route-benefit{font-size:12px;color:#1a202c;background:#f4f6f8;border-radius:6px;padding:8px;line-height:1.5}
 #sync{margin-top:12px;width:100%;padding:8px;border:0;border-radius:6px;background:#2a78d6;color:#fff;font-weight:600;cursor:pointer}
 #sync:disabled{background:#9ec5f4;cursor:wait}
 #sync-status{margin-top:6px;color:#b91c1c}
@@ -47,6 +58,18 @@ html,body,#map{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI
     <label><input type="checkbox" data-overlay="square" checked> Square obrysy</label>
   </div>
   <div id="legend"></div>
+  <div id="route">
+    <div class="label">Planovani trasy</div>
+    <div class="route-inputs">
+      <label>Delka (km)<input id="route-distance" type="number" min="2" max="42" step="0.5"></label>
+      <label>Tolerance (km)<input id="route-tolerance" type="number" min="0.5" max="10" step="0.5"></label>
+    </div>
+    <div id="route-start"></div>
+    <button id="plan">Naplanovat trasu</button>
+    <div id="route-status"></div>
+    <div id="route-benefit" hidden></div>
+    <button id="gpx" hidden>Stahnout GPX</button>
+  </div>
   <button id="sync">Aktualizovat data ze StatsHunters</button>
   <div id="sync-status" class="label"></div>
 </aside>

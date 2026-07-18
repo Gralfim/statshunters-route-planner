@@ -5,12 +5,14 @@ from pathlib import Path
 import yaml
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from cluster import find_largest_cluster
 from frontier import frontier_tiles
 from geojson import feature_collection, tile_feature, tile_outline_feature_collection
 from load import load_activities
-from scoring import find_tile_opportunities
+from routing import load_walk_graph, plan_tile_loop, route_to_gpx
+from scoring import build_route_context, find_tile_opportunities
 from square import find_largest_square
 from statshunters import resolve_share_link, sync_activities
 from tiles import build_tile_database
@@ -180,6 +182,15 @@ def get_opportunities():
     })
 
 
+@lru_cache
+def get_route_context():
+    return build_route_context({
+        "all": get_period_tile_database("all"),
+        "year": get_period_tile_database("year"),
+        "recent": get_period_tile_database("recent"),
+    })
+
+
 @app.get("/api/opportunities")
 def opportunities_geojson():
     return feature_collection(
@@ -202,6 +213,44 @@ def opportunities_geojson():
     )
 
 
+class RouteRequest(BaseModel):
+    lat: float | None = None
+    lon: float | None = None
+    distance_km: float | None = None
+    tolerance_km: float | None = None
+
+
+@app.post("/api/route")
+def plan_route(request: RouteRequest):
+    config = get_config()
+    lat = request.lat if request.lat is not None else config["home"]["lat"]
+    lon = request.lon if request.lon is not None else config["home"]["lon"]
+    distance_km = request.distance_km if request.distance_km is not None else config["target_distance_km"]
+    tolerance_km = request.tolerance_km if request.tolerance_km is not None else config["distance_tolerance_km"]
+
+    if not 2 <= distance_km <= 42:
+        raise HTTPException(status_code=400, detail="Delka trasy musi byt 2 az 42 km")
+    if not 0.2 <= tolerance_km <= distance_km / 2:
+        raise HTTPException(status_code=400, detail="Tolerance musi byt 0.2 km az polovina delky")
+
+    reach_km = (distance_km + tolerance_km) / 2 + 0.5
+    try:
+        graph = load_walk_graph(lat, lon, reach_km)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Priprava pesiho grafu selhala: {exc}")
+
+    opportunities = get_opportunities()
+    try:
+        route = plan_tile_loop(graph, lat, lon, distance_km, tolerance_km, opportunities, get_route_context())
+    except RuntimeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    candidate_tiles = {tuple(item["tile"]) for item in opportunities}
+    route["crossed_recommended"] = sum(1 for tile in route["tiles_crossed"] if tile in candidate_tiles)
+    route["gpx"] = route_to_gpx(route["coordinates"])
+    return route
+
+
 @app.post("/api/sync")
 def sync_data():
     share_link = resolve_share_link(get_config())
@@ -222,6 +271,7 @@ def sync_data():
     get_tile_database.cache_clear()
     get_period_tile_database.cache_clear()
     get_opportunities.cache_clear()
+    get_route_context.cache_clear()
     return result
 
 

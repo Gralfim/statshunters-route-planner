@@ -7,7 +7,7 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
 
 // Poradi panes ridi, ktera vrstva dostane kliknuti: doporuceni lezi nad tiles,
 // obrysy cluster/square jsou jen dekorace (interactive: false).
-const PANES = { tiles: 410, opportunities: 420, cluster: 430, square: 440 };
+const PANES = { tiles: 410, opportunities: 420, cluster: 430, square: 440, route: 450 };
 for (const [name, zIndex] of Object.entries(PANES)) {
   map.createPane(`${name}Pane`).style.zIndex = zIndex;
 }
@@ -207,9 +207,129 @@ async function loadSummary() {
 
   renderStats();
   renderLegend();
+  routeDistance.value = summary.target_distance_km;
+  routeTolerance.value = summary.distance_tolerance_km;
+  setStart(summary.home.lat, summary.home.lon);
   await drawCheckedOverlays();
   await fitToAllTiles(summary);
 }
+
+const routeDistance = document.querySelector('#route-distance');
+const routeTolerance = document.querySelector('#route-tolerance');
+const routeStartText = document.querySelector('#route-start');
+const planButton = document.querySelector('#plan');
+const gpxButton = document.querySelector('#gpx');
+const routeStatus = document.querySelector('#route-status');
+const routeBenefit = document.querySelector('#route-benefit');
+
+const GAIN_LABELS = {
+  all_square: 'square celkem',
+  all_cluster: 'cluster celkem',
+  all_unvisited: 'uplne nove tiles',
+  year_square: 'square letos',
+  year_cluster: 'cluster letos',
+  year_unvisited: 'nove letos',
+  recent_square: 'square 3 mes.',
+  recent_cluster: 'cluster 3 mes.',
+  recent_unvisited: 'nove za 3 mes.'
+};
+
+function renderBenefit(route) {
+  const parts = Object.entries(route.benefit.gains)
+    .filter(([, gain]) => gain > 0)
+    .map(([key, gain]) => `+${gain} ${GAIN_LABELS[key] || key}`);
+  routeBenefit.innerHTML = `<strong>Prinos trasy (score ${route.benefit.total})</strong><br>`
+    + (parts.length ? parts.join('<br>') : 'Zadne zlepseni statistik')
+    + `<br>stari navstev: +${route.benefit.staleness}`;
+  routeBenefit.hidden = false;
+}
+const routeLayerGroup = L.layerGroup().addTo(map);
+let startMarker = null;
+let lastRoute = null;
+
+function setStart(lat, lon) {
+  if (!startMarker) {
+    startMarker = L.marker([lat, lon], { draggable: true, title: 'Start trasy' }).addTo(map);
+    startMarker.on('dragend', () => {
+      const position = startMarker.getLatLng();
+      setStart(position.lat, position.lng);
+    });
+  } else {
+    startMarker.setLatLng([lat, lon]);
+  }
+  routeStartText.textContent = `Start: ${lat.toFixed(4)}, ${lon.toFixed(4)} (pretahni spendlik, nebo prave tlacitko v mape)`;
+}
+
+map.on('contextmenu', event => setStart(event.latlng.lat, event.latlng.lng));
+
+function drawRoute(route) {
+  routeLayerGroup.clearLayers();
+  routeLayerGroup.addLayer(L.polyline(route.coordinates, {
+    pane: 'routePane', color: '#ffffff', weight: 7, opacity: 0.9
+  }));
+  routeLayerGroup.addLayer(L.polyline(route.coordinates, {
+    pane: 'routePane', color: '#111827', weight: 3.5, opacity: 0.95
+  }));
+  map.fitBounds(L.latLngBounds(route.coordinates), { padding: [40, 40] });
+}
+
+async function planRoute() {
+  const position = startMarker.getLatLng();
+  planButton.disabled = true;
+  planButton.textContent = 'Planuji...';
+  routeStatus.style.color = '#53606f';
+  routeStatus.textContent = 'Porovnavam varianty trasy... v nove oblasti muze prvni vypocet trvat i minuty (stahovani pesi mapy).';
+  gpxButton.hidden = true;
+  routeBenefit.hidden = true;
+
+  try {
+    const response = await fetch('/api/route', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        lat: position.lat,
+        lon: position.lng,
+        distance_km: Number(routeDistance.value),
+        tolerance_km: Number(routeTolerance.value)
+      })
+    });
+    const route = await response.json();
+    if (!response.ok) throw new Error(route.detail || response.statusText);
+
+    lastRoute = route;
+    if (!route.waypoint_tiles.length) {
+      routeLayerGroup.clearLayers();
+      routeStatus.textContent = 'V dosahu startu nejsou zadne doporucene tiles - zkus jiny start nebo delsi trasu.';
+      return;
+    }
+
+    drawRoute(route);
+    const target = route.within_target ? '' : ' (mimo toleranci!)';
+    routeStatus.textContent =
+      `Trasa ${route.length_km} km${target}, nejlepsi z ${route.variants_compared} variant; ` +
+      `protne ${route.tiles_crossed.length} tiles (z toho ${route.crossed_recommended} doporucenych).`;
+    renderBenefit(route);
+    gpxButton.hidden = false;
+  } catch (error) {
+    routeStatus.style.color = '#b91c1c';
+    routeStatus.textContent = `Planovani selhalo: ${error.message}`;
+  } finally {
+    planButton.disabled = false;
+    planButton.textContent = 'Naplanovat trasu';
+  }
+}
+
+planButton.addEventListener('click', planRoute);
+
+gpxButton.addEventListener('click', () => {
+  if (!lastRoute) return;
+  const blob = new Blob([lastRoute.gpx], { type: 'application/gpx+xml' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = `trasa-${lastRoute.length_km}km.gpx`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+});
 
 const syncButton = document.querySelector('#sync');
 const syncStatus = document.querySelector('#sync-status');

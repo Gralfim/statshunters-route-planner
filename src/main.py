@@ -1,4 +1,5 @@
 import argparse
+from pathlib import Path
 
 import uvicorn
 
@@ -46,6 +47,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="StatsHunters Route Planner")
     parser.add_argument("--stats", action="store_true", help="print data summary and exit")
     parser.add_argument("--sync", action="store_true", help="download fresh data from StatsHunters and exit")
+    parser.add_argument("--reload", action="store_true", help="auto-restart the server on code changes (development)")
     parser.add_argument("--host", default="127.0.0.1", help="server host")
     parser.add_argument("--port", default=8000, type=int, help="server port")
     return parser.parse_args()
@@ -62,7 +64,10 @@ def main():
         print_stats()
         return
 
-    uvicorn.run(app, host=args.host, port=args.port)
+    if args.reload:
+        uvicorn.run("api:app", host=args.host, port=args.port, reload=True, app_dir=str(Path(__file__).parent))
+    else:
+        uvicorn.run(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

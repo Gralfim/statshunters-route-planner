@@ -21,6 +21,14 @@ def tile_lon_lat(x, y, zoom=TILE_ZOOM):
     return lon, lat
 
 
+def lon_lat_tile(lon, lat, zoom=TILE_ZOOM):
+    n = 2.0 ** zoom
+    x = int((lon + 180.0) / 360.0 * n)
+    lat_rad = math.radians(lat)
+    y = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
+    return x, y
+
+
 def tile_polygon(tile):
     x, y = tile_xy(tile)
     west, north = tile_lon_lat(x, y)

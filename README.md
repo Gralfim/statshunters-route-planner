@@ -18,7 +18,13 @@ python src/main.py --stats
 
 # stažení čerstvých dat ze StatsHunters a konec (vyžaduje share link, viz Konfigurace)
 python src/main.py --sync
+
+# pro vývoj: server se sám restartuje při změně kódu
+python src/main.py --reload
 ```
+
+Pozor: bez `--reload` platí, že statické soubory (`src/web/`) se čtou z disku vždy čerstvé,
+ale python kód drží server z doby svého startu — po změně backendu je potřeba restart.
 
 Spouštět z kořene repozitáře. Frontend běží přímo na kořenové URL (`/`), API pod `/api/...`.
 
@@ -73,6 +79,7 @@ Pozn.: `home` a délka trasy se zatím používají jen informativně v `/api/su
 | `src/square.py` | největší plně pokrytý čtverec (DP) |
 | `src/scoring.py` | bodování kandidátních tiles: 9 priorit (square/cluster/nenavštívený × 3 období) + bonus za stáří poslední návštěvy |
 | `src/statshunters.py` | klient StatsHunters share API — stránkované stahování aktivit do `data/` |
+| `src/routing.py` | plánování okruhů: pěší graf OSM (osmnx), greedy výběr tiles, GPX export |
 | `src/geojson.py` | převod tiles na GeoJSON polygony |
 | `src/web/` | Leaflet frontend (mapa, přepínání vrstev, statistiky, legenda, sync tlačítko) |
 
@@ -97,6 +104,7 @@ aby nepřekrývaly popupy tiles a doporučení.
 | `GET /api/periods/{period}/cluster` | obrys největšího clusteru |
 | `GET /api/periods/{period}/square` | obrys největšího čtverce |
 | `GET /api/opportunities` | doporučené tiles seřazené podle skóre (rank, důvody, přínosy, stáří poslední návštěvy) |
+| `POST /api/route` | naplánuje okruh; JSON body `{lat, lon, distance_km, tolerance_km}` (vše volitelné, výchozí z configu); vrací délku, waypointy, protnuté tiles, souřadnice i GPX |
 | `POST /api/sync` | stáhne čerstvá data ze StatsHunters, přepíše `data/` a vyčistí cache |
 | `GET /api/tiles`, `/api/frontier`, … | aliasy pro období `all` |
 
@@ -112,20 +120,78 @@ Skóre tile má dvě složky:
 
 **Zásada (důležité pro budoucí plánování tras):** skóre tile je *čistý přínos* jeho návštěvy — nikdy nesmí obsahovat náklady na cestu (MHD, vzdálenost od domova). Optimalizace trasy bude maximalizovat součet přínosů tiles na trase; kdyby byla cena dopravy ve skóre, započítala by se tolikrát, kolika tiles trasa projde. Náklady na dopravu patří až na úroveň trasy, jednou za trasu.
 
+## Plánování tras
+
+Zvolený stack: **osmnx + networkx** (čistý Python, ověřeno na Pythonu 3.14). Externí routery
+(BRouter, Valhalla, OSRM) nejsou potřeba — kombinatorika výběru tiles musí být v našem kódu
+tak jako tak a graf v procesu dává plnou kontrolu nad cenovou funkcí.
+
+**V mapě (hlavní cesta):** sekce „Planovani trasy" v panelu — start se volí přetažením
+špendlíku nebo pravým kliknutím do mapy, délka a tolerance v polích (výchozí z configu),
+tlačítko naplánuje trasu přes `POST /api/route`, vykreslí ji a nabídne stažení GPX.
+První výpočet po startu serveru trvá ~40 s (načtení grafu + scoring do paměti), každé
+další přeplánování je pod sekundu.
+
+```bash
+# totez z prikazove radky
+python src/routing.py --gpx route.gpx
+python src/routing.py --lat 50.1030 --lon 14.4500 --distance 10 --tolerance 2
+```
+
+Jak to funguje:
+
+1. **Pěší graf OSM** se stáhne z Overpass API kolem startu (poprvé jednotky minut) a cachuje
+   do `data/walk_<lat>_<lon>_<reach>km.graphml`. Cache je podle **pokrytí**: použije se
+   jakýkoli uložený graf, jehož kruh pokrývá požadovaný start + dosah (s tolerancí 1,5 km —
+   dosah je horní odhad a chybějící vnější lem trasu nerozbije); stahuje se velkoryse
+   (min. 10 km), takže změna délky ani startu v okolí nevyvolá nové stahování. Načtený graf
+   zůstává v paměti serveru.
+2. **Výběr trasy porovnáním variant**: staví se portfolio okruhů — rank-greedy seed
+   (cheapest insertion na odhadech vzdušná čára × 1,35), seedy kolem **skupin
+   sousedících kandidátů** (4-okolí) a **seedy na dokompletování square** (okna
+   (side+1)² s ≤ 4 chybějícími tiles v dosahu — jednotlivé chybějící tiles mají
+   samy o sobě nulový square přínos, proto je obecné hledání nemá důvod kombinovat).
+   Každá varianta se exaktně přepočítá (`bidirectional_dijkstra`, cache úseků)
+   a ohodnotí **společným přínosem všech protnutých tiles**
+   (`scoring.evaluate_tile_set`): Δsquare a Δcluster se počítají s celou množinou
+   najednou (zisky nejsou aditivní), plus počty nových tiles podle období a
+   staleness bonusy. Váhy: priorita 2^k × velikost zisku, přičemž **square se váží
+   plochou** (side² − baseline²) — bez toho by snadný růst clusteru o pár tiles
+   vždy přebil vzácný růst square a obrátil pořadí priorit. Vítěz se ještě zkouší
+   vylepšit přidáváním nevyužitých kandidátů (2 kola). Při přetečení tolerance
+   odpadá nejslabší waypoint.
+3. **Ořez ocásků**: slepé úseky tam-a-zpět (dijkstra vede trasu až k uzlu u středu
+   tile, ale tile se počítá už prvním vstupem) se zkracují na nejmenší délku, která
+   zachová množinu protnutých tiles — přínos se nemění, hluchá vzdálenost mizí.
+4. **Výstup**: délka, waypoint tiles, všechny protnuté tiles, rozpad přínosu
+   (zobrazuje se v panelu), počet porovnaných variant, GPX.
+
+Naměřeno (Praha, okolí Karlova náměstí, graf 141 810 uzlů): plánování okruhu **0,3–0,4 s**;
+jednorázově načtení grafu z cache ~24 s a scoring ~9 s (obojí si server podrží v paměti).
+Interaktivní přeplánovávání při změně parametrů je tedy proveditelné.
+
+Známá omezení prototypu: GPX vede po uzlech grafu (rovné čáry mezi křižovatkami — pro
+navigaci doplnit geometrie hran), okruh se nevyhýbá zpáteční cestě stejnou ulicí a cílová
+funkce zatím nesčítá společný přínos množiny tiles.
+
 ## Stav vývoje (2026-07-18)
 
 **Hotové (commitnuté):** mapa s tiles pro 3 časová období, obrysy max clusteru a max square, panel se statistikami, scoring doporučených tiles (`/api/opportunities`).
 
 **Nové (zatím necommitnuté):**
-- automatická synchronizace dat ze StatsHunters share API (`--sync`, `POST /api/sync`, tlačítko v mapě) — ověřeno proti lokálnímu falešnému API,
-- bonus za stáří poslední návštěvy ve scoringu + zobrazení „Naposledy: datum (před N dny)" v popupu.
+- plánování okruhů (`src/routing.py` + `POST /api/route` + UI v mapě) — špendlík startu, délka/tolerance v panelu, vykreslení trasy, GPX ke stažení; po warm-upu přeplánování 0,3–1,7 s,
+- **optimalizace společného přínosu**: trasa se vybírá porovnáním variant podle skutečného zisku statistik celé množiny protnutých tiles; square vážený plochou + seedy na dokompletování square (ověřený postup zlepšení z Karlova nám.: greedy 18,6 → portfolio 36,9 → square-aware 96,6, trasa 4×4 → 5×5 přes Košíře); rozpad přínosu se zobrazuje v panelu.
+
+**Empirické zjištění (07/2026):** v doběhovém dosahu z Karlova náměstí (~8 km) je už všechno
+navštívené i letos — lokálně jde zlepšovat jen 3měsíční metriky. Velké zisky (nové tiles,
+celkový square/cluster) leží na okrajích navštíveného území, tj. vyžadují jiný start nebo
+dopravu — to dává prioritu bodu „Dosažitelnost MHD" níže.
 
 ## Další kroky (návrh)
 
-1. **Generování tras** — hlavní chybějící kus: z doporučených tiles sestavit reálnou okružní trasu o délce `target_distance_km ± tolerance` (start doma, nebo start/cíl u MHD). Možnosti: lokální OSM síť + `osmnx`/`networkx`, nebo externí router (BRouter, Valhalla, OSRM). Výstupem i GPX export do hodinek. Cílová funkce má dvě zásady:
-   - přínos trasy = **společný přínos celé množiny tiles na trase**, ne součet individuálních skóre — strukturní zisky nejsou aditivní (skupina sousedních tiles může zvětšit square/cluster, i když žádný z nich samostatně ne). Metriky je potřeba přepočítat s celou množinou tiles trasy najednou; individuální skóre tiles slouží jen jako heuristika pro výběr kandidátů;
-   - náklady na dopravu se odečtou **jednou za trasu** (viz zásada výše), nikdy per tile.
-2. **Dosažitelnost** — filtr kandidátů podle doběhu/dojezdu MHD. Jen jako filtr nebo route-level náklad, ne jako složka skóre tile.
-3. **Výkon `/api/opportunities`** — `_measure_gain` přepočítává celý cluster/square pro každého kandidáta; s růstem dat zvážit inkrementální výpočet a persistentní cache (teď jen `lru_cache` do restartu).
-4. **Testy** — v repu zatím žádné; pytest pro `cluster`, `square`, `scoring`, `statshunters` (sync klient má přepsatelnou `STATSHUNTERS_BASE_URL`, takže jde testovat proti lokálnímu falešnému serveru).
-5. **Drobnosti:** sjednotit duplicitní frontier logiku (`frontier.py` vs. `_frontier_tiles` ve `scoring.py`), konfigurovatelný typ aktivity, UI filtr top-N doporučení.
+1. **Asynchronní příprava nové oblasti** — `POST /api/route` v úplně nové oblasti blokuje na minuty (Overpass download) a hrozí timeout prohlížeče; převést na úlohu na pozadí s hlášením průběhu do UI.
+2. **Kvalita okruhu** — společný přínos množiny i ořez slepých ocásků jsou hotové; zbývá: penalizace průchodu stejnou ulicí oběma směry na různých úsecích okruhu, GPX z geometrií hran (ne jen uzlů), preference typů cest (parky/stezky vs. ulice — vážení hran podle OSM tagů highway/surface). Náklady na dopravu odečítat **jednou za trasu**, nikdy per tile.
+3. **Dosažitelnost MHD** — start/cíl u zastávky MHD jako alternativa okruhu z domova. Jen jako filtr nebo route-level náklad, ne jako složka skóre tile.
+4. **Výkon `/api/opportunities`** — `_measure_gain` přepočítává celý cluster/square pro každého kandidáta; s růstem dat zvážit inkrementální výpočet a persistentní cache (teď jen `lru_cache` do restartu).
+5. **Testy** — v repu zatím žádné; pytest pro `cluster`, `square`, `scoring`, `routing` (čisté funkce), `statshunters` (sync klient má přepsatelnou `STATSHUNTERS_BASE_URL`, takže jde testovat proti lokálnímu falešnému serveru).
+6. **Drobnosti:** sjednotit duplicitní frontier logiku (`frontier.py` vs. `_frontier_tiles` ve `scoring.py`), konfigurovatelný typ aktivity, UI filtr top-N doporučení.
