@@ -154,8 +154,11 @@ Jak to funguje:
    sousedících kandidátů** (4-okolí) a **seedy na dokompletování square** (okna
    (side+1)² s ≤ 4 chybějícími tiles v dosahu — jednotlivé chybějící tiles mají
    samy o sobě nulový square přínos, proto je obecné hledání nemá důvod kombinovat).
-   Každá varianta se exaktně přepočítá (`bidirectional_dijkstra`, cache úseků)
-   a ohodnotí **společným přínosem všech protnutých tiles**
+   Každá varianta se exaktně přepočítá (`bidirectional_dijkstra` vážená
+   **preferencemi typů cest**: cyklostezka 0,60 > pěšina/turistická cesta 0,70 >
+   pěší zóna 0,80 > chodník 0,85 > klidná ulice 1,0; rušné silnice ×1,35–3,0 a
+   schody ×1,4 penalizované — délková tolerance se ale vždy kontroluje proti
+   skutečným metrům) a ohodnotí **společným přínosem všech protnutých tiles**
    (`scoring.evaluate_tile_set`): Δsquare a Δcluster se počítají s celou množinou
    najednou (zisky nejsou aditivní), plus počty nových tiles podle období a
    staleness bonusy. Váhy: priorita 2^k × velikost zisku, přičemž **square se váží
@@ -166,16 +169,16 @@ Jak to funguje:
 3. **Ořez ocásků**: slepé úseky tam-a-zpět (dijkstra vede trasu až k uzlu u středu
    tile, ale tile se počítá už prvním vstupem) se zkracují na nejmenší délku, která
    zachová množinu protnutých tiles — přínos se nemění, hluchá vzdálenost mizí.
-4. **Výstup**: délka, waypoint tiles, všechny protnuté tiles, rozpad přínosu
-   (zobrazuje se v panelu), počet porovnaných variant, GPX.
+4. **Výstup**: délka, waypoint tiles, všechny protnuté tiles (počítané z plné
+   geometrie hran — trasy v mapě i GPX kopírují skutečné tvary ulic), rozpad
+   přínosu (zobrazuje se v panelu), počet porovnaných variant, GPX.
 
 Naměřeno (Praha, okolí Karlova náměstí, graf 141 810 uzlů): plánování okruhu **0,3–0,4 s**;
 jednorázově načtení grafu z cache ~24 s a scoring ~9 s (obojí si server podrží v paměti).
 Interaktivní přeplánovávání při změně parametrů je tedy proveditelné.
 
-Známá omezení prototypu: GPX vede po uzlech grafu (rovné čáry mezi křižovatkami — pro
-navigaci doplnit geometrie hran), okruh se nevyhýbá zpáteční cestě stejnou ulicí a cílová
-funkce zatím nesčítá společný přínos množiny tiles.
+Známé omezení: okruh se nevyhýbá průchodu stejnou ulicí oběma směry na různých
+úsecích (slepé ocásky se ořezávají, viz bod 3).
 
 ## Výpravy s MHD
 
@@ -215,6 +218,7 @@ v panelu; čistý okruh bez MHD je vždy jednou z porovnávaných variant.
 **Nové (zatím necommitnuté):**
 - plánování okruhů (`src/routing.py` + `POST /api/route` + UI v mapě) — špendlík startu, délka/tolerance v panelu, vykreslení trasy, GPX ke stažení; po warm-upu přeplánování 0,3–1,7 s,
 - **optimalizace společného přínosu**: trasa se vybírá porovnáním variant podle skutečného zisku statistik celé množiny protnutých tiles; square vážený plochou + seedy na dokompletování square (ověřený postup zlepšení z Karlova nám.: greedy 18,6 → portfolio 36,9 → square-aware 96,6, trasa 4×4 → 5×5 přes Košíře); rozpad přínosu se zobrazuje v panelu,
+- **kvalita tras**: preference typů cest pro běh (cyklostezka > turistická cesta > park/pěší zóna > chodník > klidná ulice; rušné silnice penalizované) — ověřeno: trasa Karlovo nám. → Podolí přešla z 77 % preferovaných / 21 % silnic na **98 % preferovaných / 1 % silnic** při stejné délce; trasy a GPX nově kopírují skutečné geometrie ulic (896 bodů místo ~370 uzlů),
 - **výpravy s MHD** (`src/transit.py` + `src/expedition.py` + `POST /api/expedition` + tlačítko v UI) — ověřeno E2E: z Karlova nám. při 15±3 km / 120 min vyhrála výprava metro A + bus 350 do Roztok (benefit 1371 vs. 96,6 čistého okruhu, 3 nové tiles, 117,7 min); při 12±3 km / 150 min vlak T7 do Dobřichovic (0 přestupů) s dokompletováním **celkového square 15×15 → 16×16** (benefit 17 138, 148,4 min) — shoduje se s intuicí uživatele (Černošice/Solopisky), která na 120 min opravdu nevychází.
 
 **Empirické zjištění (07/2026):** v doběhovém dosahu z Karlova náměstí (~8 km) je už všechno
@@ -225,7 +229,7 @@ dopravu — to dává prioritu bodu „Dosažitelnost MHD" níže.
 ## Další kroky (návrh)
 
 1. **Asynchronní příprava nové oblasti** — `POST /api/route` v úplně nové oblasti blokuje na minuty (Overpass download) a hrozí timeout prohlížeče; převést na úlohu na pozadí s hlášením průběhu do UI.
-2. **Kvalita okruhu** — společný přínos množiny i ořez slepých ocásků jsou hotové; zbývá: penalizace průchodu stejnou ulicí oběma směry na různých úsecích okruhu, GPX z geometrií hran (ne jen uzlů), preference typů cest (parky/stezky vs. ulice — vážení hran podle OSM tagů highway/surface). Náklady na dopravu odečítat **jednou za trasu**, nikdy per tile.
+2. **Kvalita okruhu** — společný přínos množiny, ořez ocásků, geometrie hran i preference typů cest jsou hotové; zbývá: penalizace průchodu stejnou ulicí oběma směry na různých úsecích okruhu, případně konfigurovatelné faktory preferencí v `config.yaml` a jemnější rozlišení chodník vs. cesta v parku (vyžaduje tagy `footway`/`surface` navíc v osmnx `useful_tags_way` + nové stažení grafů). Náklady na dopravu odečítat **jednou za trasu**, nikdy per tile.
 3. **Výpravy s MHD — další iterace** — v1 hotová (viz výše); zbývá: nesymetrický návrat (jiná zastávka / jiné spojení zpět), běh z bodu do bodu (MHD tam, doběh domů nebo na jinou zastávku), reálné intervaly linek místo paušálního čekání (GTFS frequencies), přesnost pěších přesunů (teď vzdušná čára × 1,3). Náklady na dopravu zůstávají route-level, nikdy ve skóre tile.
 4. **Výkon `/api/opportunities`** — `_measure_gain` přepočítává celý cluster/square pro každého kandidáta; s růstem dat zvážit inkrementální výpočet a persistentní cache (teď jen `lru_cache` do restartu).
 5. **Testy** — v repu zatím žádné; pytest pro `cluster`, `square`, `scoring`, `routing` (čisté funkce), `statshunters` (sync klient má přepsatelnou `STATSHUNTERS_BASE_URL`, takže jde testovat proti lokálnímu falešnému serveru).

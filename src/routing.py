@@ -30,6 +30,34 @@ def tile_center(tile):
     return lat, lon
 
 
+# Preference typu cest pro beh (uzivatel 2026-07-19): cyklostezka > turisticka
+# cesta/pesina > park a pesi zona > chodnik > klidna silnice; rusne silnice
+# penalizovane, schody take. Nasobi delku hrany pri hledani cesty (run_cost);
+# realna delka trasy se pocita zvlast ze skutecnych metru.
+RUN_PREFERENCES = {
+    "cycleway": 0.60,
+    "path": 0.70,
+    "track": 0.70,
+    "bridleway": 0.75,
+    "pedestrian": 0.80,
+    "footway": 0.85,
+    "living_street": 0.95,
+    "residential": 1.0,
+    "service": 1.05,
+    "unclassified": 1.05,
+    "road": 1.1,
+    "steps": 1.4,
+    "tertiary": 1.35,
+    "tertiary_link": 1.35,
+    "secondary": 1.7,
+    "secondary_link": 1.7,
+    "primary": 2.2,
+    "primary_link": 2.2,
+    "trunk": 3.0,
+    "trunk_link": 3.0,
+}
+DEFAULT_RUN_FACTOR = 1.1
+
 MIN_DOWNLOAD_REACH_KM = 10
 # Reach je horni odhad (vzdusnou carou max/2 + rezerva); kandidatni tiles lezi
 # nejvyse na 90 % teto vzdalenosti. Chybejici vnejsi lem grafu tedy trasu
@@ -59,6 +87,22 @@ def _covering_graph_path(lat, lon, reach_km):
     return best[0] if best else None
 
 
+def _edge_factor(highway):
+    if isinstance(highway, (list, tuple)):
+        return min(
+            (RUN_PREFERENCES.get(value, DEFAULT_RUN_FACTOR) for value in highway),
+            default=DEFAULT_RUN_FACTOR,
+        )
+    return RUN_PREFERENCES.get(highway, DEFAULT_RUN_FACTOR)
+
+
+def prepare_run_costs(graph):
+    """Doplni hranam run_cost = delka x preference typu cesty."""
+    for _u, _v, data in graph.edges(data=True):
+        data["run_cost"] = float(data["length"]) * _edge_factor(data.get("highway"))
+    return graph
+
+
 _GRAPH_MEMORY = {}
 
 
@@ -78,11 +122,11 @@ def load_walk_graph(lat, lon, reach_km):
         )
         path = graph_path(lat, lon, download_reach)
         ox.save_graphml(graph, path)
-        _GRAPH_MEMORY[str(path)] = graph
-        return graph
+        _GRAPH_MEMORY[str(path)] = prepare_run_costs(graph)
+        return _GRAPH_MEMORY[str(path)]
 
     if str(path) not in _GRAPH_MEMORY:
-        _GRAPH_MEMORY[str(path)] = ox.load_graphml(path)
+        _GRAPH_MEMORY[str(path)] = prepare_run_costs(ox.load_graphml(path))
     return _GRAPH_MEMORY[str(path)]
 
 
@@ -110,12 +154,18 @@ def nearest_node(node_index, lat, lon):
     return nodes[int(np.argmin(d2))]
 
 
+def _best_edge(graph, u, v):
+    return min(graph[u][v].values(), key=lambda edge: edge.get("run_cost", edge["length"]))
+
+
 def _leg(graph, cache, a, b):
+    """Nejlepsi usek podle run_cost (preference typu cest); vraci REALNOU delku."""
     import networkx as nx
 
     if (a, b) not in cache:
         try:
-            length, path = nx.bidirectional_dijkstra(graph, a, b, weight="length")
+            _cost, path = nx.bidirectional_dijkstra(graph, a, b, weight="run_cost")
+            length = _path_length_m(graph, path)
         except nx.NetworkXNoPath:
             length, path = math.inf, None
         cache[(a, b)] = (length, path)
@@ -144,9 +194,35 @@ def _trim_spurs(node_tiles, node_path):
 
 def _path_length_m(graph, node_path):
     return float(sum(
-        min(edge["length"] for edge in graph[u][v].values())
+        _best_edge(graph, u, v)["length"]
         for u, v in zip(node_path, node_path[1:])
     ))
+
+
+def _path_coordinates(graph, node_path):
+    """Souradnice trasy vcetne geometrii hran (skutecne tvary ulic, ne jen
+    spojnice krizovatek) - presnejsi GPX, mapa i vypocet protnutych tiles."""
+    if len(node_path) < 2:
+        return [(graph.nodes[n]["y"], graph.nodes[n]["x"]) for n in node_path]
+
+    coordinates = []
+    for u, v in zip(node_path, node_path[1:]):
+        edge = _best_edge(graph, u, v)
+        geometry = edge.get("geometry")
+        if geometry is not None:
+            points = [(lat, lon) for lon, lat in geometry.coords]
+            u_lat, u_lon = graph.nodes[u]["y"], graph.nodes[u]["x"]
+            starts_at_u = (abs(points[0][0] - u_lat) + abs(points[0][1] - u_lon)
+                           <= abs(points[-1][0] - u_lat) + abs(points[-1][1] - u_lon))
+            if not starts_at_u:
+                points.reverse()
+        else:
+            points = [
+                (graph.nodes[u]["y"], graph.nodes[u]["x"]),
+                (graph.nodes[v]["y"], graph.nodes[v]["x"]),
+            ]
+        coordinates.extend(points if not coordinates else points[1:])
+    return coordinates
 
 
 def plan_walk(graph, from_lat, from_lon, to_lat, to_lon):
@@ -159,7 +235,7 @@ def plan_walk(graph, from_lat, from_lon, to_lat, to_lon):
         raise RuntimeError("No walkable path between the points")
     return {
         "km": round(float(length_m) / 1000, 2),
-        "coordinates": [(graph.nodes[n]["y"], graph.nodes[n]["x"]) for n in path],
+        "coordinates": _path_coordinates(graph, path),
     }
 
 
@@ -316,7 +392,7 @@ def _route_details(graph, leg_cache, node_index, start_node, sequence, min_m, ma
         weakest = min(sequence, key=lambda item: item["score"])
         sequence = [item for item in sequence if item is not weakest]
 
-    coordinates = [(graph.nodes[n]["y"], graph.nodes[n]["x"]) for n in node_path]
+    coordinates = _path_coordinates(graph, node_path)
     crossed = {lon_lat_tile(lon, lat) for lat, lon in coordinates}
     return {
         "sequence": sequence,
