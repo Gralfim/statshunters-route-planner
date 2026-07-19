@@ -1,10 +1,11 @@
-"""Planovani vypravy: [beh na zastavku] -> MHD -> beh (okruh) -> MHD -> [beh domu].
+"""Planovani vypravy: [beh na zastavku] -> MHD -> beh -> MHD -> [beh domu].
 
 Casovy rozpocet (budget_min) pokryva celou vypravu. Pesi presuny na zastavku a
-zpet se pocitaji do kilometru behu. Cista varianta bez MHD (okruh primo ze
-startu) se porovnava vzdy; MHD varianty se nejdriv levne ohodnoti odhadem
-(spolecny prinos cilove oblasti + cas spojeni) a exaktne se planuji jen nejlepsi.
-Zpatecni spojeni se v teto verzi uvazuje symetricke (stejna zastavka a cas).
+zpet se planuji po stejnem pesim grafu jako behy a pocitaji se do kilometru
+behu. Navrat muze vest z jine zastavky nez vystup (beh z bodu do bodu pres
+cilovou oblast). Cekani na spoje vychazi z intervalu linek pro dany typ dne
+(vsedni den / vikend). Cista varianta bez MHD se porovnava vzdy; MHD varianty
+se nejdriv levne ohodnoti odhadem a exaktne se planuji jen nejlepsi.
 """
 import math
 
@@ -14,21 +15,25 @@ from routing import (
     haversine_m,
     load_walk_graph,
     plan_tile_loop,
+    plan_walk,
     tile_center,
 )
 from scoring import evaluate_tile_set
 
-WALK_DETOUR = 1.3
+WALK_DETOUR = 1.3               # jen pro levne odhady pri screeningu
+HOME_WALK_REACH_KM = 3.0
 HOME_STOP_RADIUS_M = 1500
 HOME_STOP_LIMIT = 12
 TARGET_STOP_LIMIT = 15
+RETURN_STOP_LIMIT = 8
+RETURN_COST_SLACK = 15.0        # navrat smi byt o tolik "drazsi", kdyz umozni prechod oblasti
 MAX_TARGETS = 20
-TRANSIT_SPEED_KMH = 40  # hruby horni odhad rychlosti MHD vc. cekani (pro predfiltr)
-MAX_EXACT_TRANSIT_PLANS = 2
+TRANSIT_SPEED_KMH = 40          # hruby horni odhad rychlosti MHD vc. cekani (pro predfiltr)
+MAX_EXACT_TRANSIT_PLANS = 3
 MIN_LOOP_KM = 3.0
 MIN_TARGET_BENEFIT = 20.0
-MAX_TARGET_SPAN_TILES = 6   # vetsi skupiny nejsou cil jednoho behu - deli se
-TARGET_CELL_TILES = 4       # mrizka deleni (~6 km)
+MAX_TARGET_SPAN_TILES = 6       # vetsi skupiny nejsou cil jednoho behu - deli se
+TARGET_CELL_TILES = 4           # mrizka deleni (~6 km)
 
 
 def _split_group(group):
@@ -110,7 +115,8 @@ def _square_window_targets(context, max_missing=4, per_period=8):
 
 
 def build_targets(opportunities, context):
-    """Cilove oblasti = lokalni skupiny sousednich kandidatu se spolecnym prinosem."""
+    """Cilove oblasti = lokalni skupiny sousednich kandidatu se spolecnym
+    prinosem + okna na dokompletovani max square."""
     candidates = [
         {"tile": tuple(item["tile"]), "score": item["score"]}
         for item in opportunities
@@ -150,10 +156,30 @@ def _run_segment(route, pace_min_per_km):
     }
 
 
-def _loop_window(target_km, tolerance_km, walks_km, budget_min, transit_min, pace):
-    """Okno delky okruhu tak, aby beh (vcetne pesich presunu) splnil delkovou
+def _walk_segment(walk, pace, desc):
+    return {
+        "type": "walk",
+        "km": walk["km"],
+        "min": round(walk["km"] * pace, 1),
+        "coordinates": walk["coordinates"],
+        "desc": desc,
+    }
+
+
+def _transit_segment(connection, desc):
+    return {
+        "type": "transit",
+        "min": connection["minutes"],
+        "transfers": connection["transfers"],
+        "legs": connection["legs"],
+        "desc": desc,
+    }
+
+
+def _loop_window(target_km, tolerance_km, walks_km, budget_min, transit_total_min, pace):
+    """Okno delky behu tak, aby beh (vcetne pesich presunu) splnil delkovou
     toleranci i casovy rozpocet."""
-    run_minutes = budget_min - 2 * transit_min
+    run_minutes = budget_min - transit_total_min
     max_by_time = run_minutes / pace - walks_km
     loop_max = min(target_km + tolerance_km - walks_km, max_by_time)
     loop_min = target_km - tolerance_km - walks_km
@@ -162,12 +188,8 @@ def _loop_window(target_km, tolerance_km, walks_km, budget_min, transit_min, pac
     return (max(loop_min, MIN_LOOP_KM) + loop_max) / 2, (loop_max - max(loop_min, MIN_LOOP_KM)) / 2
 
 
-def _transit_candidates(start_lat, start_lon, target_km, tolerance_km, budget_min, pace, network, targets):
-    home_stops = network.stops_near(start_lat, start_lon, HOME_STOP_RADIUS_M)[:HOME_STOP_LIMIT]
-    if not home_stops:
-        return []
-    origin_ids = [stop_id for _, stop_id in home_stops]
-
+def _transit_candidates(start_lat, start_lon, target_km, tolerance_km, budget_min, pace,
+                        network, targets, origin_ids, day):
     # predfiltr dosazitelnosti: cile, ke kterym se pri nejkratsim pripustnem behu
     # vubec da dojet a vratit se v rozpoctu (hruby odhad rychlosti MHD)
     min_run_min = max(target_km - tolerance_km, MIN_LOOP_KM) * pace
@@ -185,14 +207,13 @@ def _transit_candidates(start_lat, start_lon, target_km, tolerance_km, budget_mi
     candidates = []
     seen_stops = set()
     for target in eligible[:MAX_TARGETS]:
-
-        # zastavka musi byt tak blizko cile, aby ho okruh obsahl
+        # zastavka musi byt tak blizko cile, aby ho beh obsahl
         stop_radius = (target_km + tolerance_km) * 1000 / 2 * 0.8
         stops = network.stops_near(target["lat"], target["lon"], stop_radius)[:TARGET_STOP_LIMIT]
         if not stops:
             continue
 
-        connection = network.route(origin_ids, [stop_id for _, stop_id in stops])
+        connection = network.route(origin_ids, [stop_id for _, stop_id in stops], day=day)
         if not connection or not connection["legs"]:
             continue
         if connection["stop_id"] in seen_stops:
@@ -205,13 +226,16 @@ def _transit_candidates(start_lat, start_lon, target_km, tolerance_km, budget_mi
         walk_km = haversine_m(start_lat, start_lon, board[1], board[2]) * WALK_DETOUR / 1000
 
         window = _loop_window(
-            target_km, tolerance_km, 2 * walk_km, budget_min, connection["minutes"], pace
+            target_km, tolerance_km, 2 * walk_km, budget_min, 2 * connection["minutes"], pace
         )
         if window is None:
             continue
 
         candidates.append({
             "target": target,
+            "target_km": target_km,
+            "tolerance_km": tolerance_km,
+            "stop_radius": stop_radius,
             "connection": connection,
             "board": {"id": board_id, "name": board[0], "lat": board[1], "lon": board[2]},
             "alight": {"id": connection["stop_id"], "name": alight[0], "lat": alight[1], "lon": alight[2]},
@@ -232,74 +256,122 @@ def _plan_pure_loop(start_lat, start_lon, target_km, tolerance_km, budget_min, p
     reach_km = (loop_target + loop_tolerance) / 2 + 0.5
     graph = load_walk_graph(start_lat, start_lon, reach_km)
     route = plan_tile_loop(graph, start_lat, start_lon, loop_target, loop_tolerance, opportunities, context)
-    total_min = route["length_km"] * pace
+    total_min = round(route["length_km"] * pace, 1)
     return {
         "kind": "loop",
         "benefit": route["benefit"],
         "run_km": route["length_km"],
-        "total_min": round(total_min, 1),
-        "within_budget": total_min <= budget_min,
+        "total_min": total_min,
+        "within_budget": bool(total_min <= budget_min),
         "segments": [_run_segment(route, pace)],
         "route": route,
     }
 
 
-def _plan_transit_expedition(candidate, start_lat, start_lon, pace, budget_min, opportunities, context):
+def _choose_return(network, candidate, origin_ids, day):
+    """Zpatecni spojeni: mezi zastavkami u cile vyber tu s dobrym spojenim domu,
+    ktera je co nejdal od vystupni zastavky - beh pak cilovou oblast prejde,
+    misto aby se vracel na stejne misto."""
+    target = candidate["target"]
+    stops = network.stops_near(target["lat"], target["lon"], candidate["stop_radius"])[:RETURN_STOP_LIMIT]
+
+    options = []
+    for _, stop_id in stops:
+        connection = network.route([stop_id], origin_ids, day=day)
+        if connection:
+            options.append((stop_id, connection))
+    if not options:
+        return None
+
+    best_cost = min(connection["cost"] for _, connection in options)
+    viable = [
+        (stop_id, connection) for stop_id, connection in options
+        if connection["cost"] <= best_cost + RETURN_COST_SLACK
+    ]
     alight = candidate["alight"]
-    reach_km = (candidate["loop_target"] + candidate["loop_tolerance"]) / 2 + 0.5
-    graph = load_walk_graph(alight["lat"], alight["lon"], reach_km)
+    stop_id, connection = max(
+        viable,
+        key=lambda item: haversine_m(
+            alight["lat"], alight["lon"], network.stops[item[0]][1], network.stops[item[0]][2]
+        ),
+    )
+    stop = network.stops[stop_id]
+    return {
+        "stop": {"id": stop_id, "name": stop[0], "lat": stop[1], "lon": stop[2]},
+        "connection": connection,
+    }
+
+
+def _plan_transit_expedition(candidate, start_lat, start_lon, pace, budget_min,
+                             opportunities, context, network, origin_ids, day):
+    board = candidate["board"]
+    alight = candidate["alight"]
+    conn_out = candidate["connection"]
+
+    home_graph = load_walk_graph(start_lat, start_lon, HOME_WALK_REACH_KM)
+    walk_out = plan_walk(home_graph, start_lat, start_lon, board["lat"], board["lon"])
+
+    returning = _choose_return(network, candidate, origin_ids, day)
+    if returning is None:
+        raise RuntimeError("No return connection from the target area")
+    return_stop = returning["stop"]
+    conn_back = returning["connection"]
+    home_exit = network.stops[conn_back["stop_id"]]
+    walk_back = plan_walk(home_graph, home_exit[1], home_exit[2], start_lat, start_lon)
+
+    walks_km = walk_out["km"] + walk_back["km"]
+    transit_total = conn_out["minutes"] + conn_back["minutes"]
+    window = _loop_window(
+        candidate["target_km"], candidate["tolerance_km"], walks_km, budget_min, transit_total, pace
+    )
+    if window is None:
+        raise RuntimeError("Expedition does not fit the time budget")
+    run_target, run_tolerance = window
+
+    span_km = haversine_m(alight["lat"], alight["lon"], return_stop["lat"], return_stop["lon"]) / 1000
+    reach_km = (run_target + run_tolerance) / 2 + span_km / 2 + 0.5
+    graph = load_walk_graph(
+        (alight["lat"] + return_stop["lat"]) / 2, (alight["lon"] + return_stop["lon"]) / 2, reach_km
+    )
     route = plan_tile_loop(
-        graph, alight["lat"], alight["lon"],
-        candidate["loop_target"], candidate["loop_tolerance"],
-        opportunities, context,
+        graph, alight["lat"], alight["lon"], run_target, run_tolerance,
+        opportunities, context, end_lat=return_stop["lat"], end_lon=return_stop["lon"],
     )
 
-    connection = candidate["connection"]
-    walk_km = candidate["walk_km"]
-    walk_min = round(walk_km * pace, 1)
-    run_km = round(route["length_km"] + 2 * walk_km, 2)
-    total_min = round(2 * walk_min + 2 * connection["minutes"] + route["length_km"] * pace, 1)
+    run_km = round(route["length_km"] + walks_km, 2)
+    total_min = round((route["length_km"] + walks_km) * pace + transit_total, 1)
 
-    walk_segment = {
-        "type": "walk",
-        "km": walk_km,
-        "min": walk_min,
-        "from": {"lat": start_lat, "lon": start_lon},
-        "to": {"lat": candidate["board"]["lat"], "lon": candidate["board"]["lon"]},
-        "desc": f"Behem na zastavku {candidate['board']['name']}",
-    }
-    transit_segment = {
-        "type": "transit",
-        "min": connection["minutes"],
-        "transfers": connection["transfers"],
-        "legs": connection["legs"],
-        "desc": f"{candidate['board']['name']} -> {alight['name']}",
-    }
     return {
         "kind": "transit",
         "benefit": route["benefit"],
         "run_km": run_km,
         "total_min": total_min,
-        "within_budget": total_min <= budget_min,
-        "board": candidate["board"],
+        "within_budget": bool(total_min <= budget_min),
+        "board": board,
         "alight": alight,
+        "return_stop": return_stop,
         "segments": [
-            walk_segment,
-            transit_segment,
+            _walk_segment(walk_out, pace, f"Behem na zastavku {board['name']}"),
+            _transit_segment(conn_out, f"{board['name']} -> {alight['name']}"),
             _run_segment(route, pace),
-            {**transit_segment, "desc": f"{alight['name']} -> {candidate['board']['name']} (navrat)"},
-            {**walk_segment, "desc": "Behem zpet na start",
-             "from": walk_segment["to"], "to": walk_segment["from"]},
+            _transit_segment(conn_back, f"{return_stop['name']} -> {home_exit[0]} (navrat)"),
+            _walk_segment(walk_back, pace, f"Behem domu ze zastavky {home_exit[0]}"),
         ],
         "route": route,
     }
 
 
 def plan_expedition(start_lat, start_lon, target_km, tolerance_km, budget_min, pace,
-                    opportunities, context, network, targets):
-    candidates = _transit_candidates(
-        start_lat, start_lon, target_km, tolerance_km, budget_min, pace, network, targets
-    )
+                    opportunities, context, network, targets, day="weekday"):
+    home_stops = network.stops_near(start_lat, start_lon, HOME_STOP_RADIUS_M)[:HOME_STOP_LIMIT]
+    origin_ids = [stop_id for _, stop_id in home_stops]
+
+    candidates = []
+    if origin_ids:
+        candidates = _transit_candidates(
+            start_lat, start_lon, target_km, tolerance_km, budget_min, pace,
+            network, targets, origin_ids, day,
+        )
 
     # exaktne planuj: kandidaty s uz stazenym grafem maji prednost (bez cekani)
     def has_cached_graph(candidate):
@@ -318,7 +390,8 @@ def plan_expedition(start_lat, start_lon, target_km, tolerance_km, budget_min, p
     for candidate in ordered[:MAX_EXACT_TRANSIT_PLANS]:
         try:
             plans.append(_plan_transit_expedition(
-                candidate, start_lat, start_lon, pace, budget_min, opportunities, context
+                candidate, start_lat, start_lon, pace, budget_min,
+                opportunities, context, network, origin_ids, day,
             ))
         except RuntimeError:
             continue
@@ -340,4 +413,5 @@ def plan_expedition(start_lat, start_lon, target_km, tolerance_km, budget_min, p
     ]
     best["budget_min"] = budget_min
     best["pace_min_per_km"] = pace
+    best["day"] = day
     return best

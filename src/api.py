@@ -272,6 +272,7 @@ class ExpeditionRequest(BaseModel):
     tolerance_km: float | None = None
     budget_min: float | None = None
     pace_min_per_km: float | None = None
+    weekend: bool | None = None
 
 
 @app.post("/api/expedition")
@@ -293,10 +294,14 @@ def plan_expedition_endpoint(request: ExpeditionRequest):
     if not 3 <= pace <= 12:
         raise HTTPException(status_code=400, detail="Tempo musi byt 3 az 12 min/km")
 
+    weekend = request.weekend if request.weekend is not None else date.today().weekday() >= 5
+    day = "weekend" if weekend else "weekday"
+
     try:
         plan = plan_expedition(
             lat, lon, distance_km, tolerance_km, budget_min, pace,
             get_opportunities(), get_route_context(), get_transit_network(), get_expedition_targets(),
+            day=day,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=422, detail=str(exc))

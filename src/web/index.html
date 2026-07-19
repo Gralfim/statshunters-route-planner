@@ -42,6 +42,7 @@ html,body,#map{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI
 #route-segments{font-size:12px;color:#1a202c;background:#f4f6f8;border-radius:6px;padding:8px;line-height:1.5}
 #gpx{padding:7px;border:1px solid #111827;border-radius:6px;background:#fff;color:#111827;font-weight:600;cursor:pointer}
 #route-status,#route-start{font-size:12px;color:#53606f}
+.route-check{display:flex;align-items:center;gap:6px;font-size:12px;color:#53606f}
 #route-benefit{font-size:12px;color:#1a202c;background:#f4f6f8;border-radius:6px;padding:8px;line-height:1.5}
 #sync{margin-top:12px;width:100%;padding:8px;border:0;border-radius:6px;background:#2a78d6;color:#fff;font-weight:600;cursor:pointer}
 #sync:disabled{background:#9ec5f4;cursor:wait}
@@ -70,6 +71,7 @@ html,body,#map{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI
       <label>Cas vypravy (min)<input id="route-budget" type="number" min="20" max="360" step="10"></label>
       <label>Tempo (min/km)<input id="route-pace" type="number" min="3" max="12" step="0.5"></label>
     </div>
+    <label class="route-check"><input type="checkbox" id="route-weekend"> Vikendove intervaly MHD</label>
     <div id="route-start"></div>
     <button id="plan">Naplanovat trasu</button>
     <button id="plan-expedition">Naplanovat vypravu (s MHD)</button>

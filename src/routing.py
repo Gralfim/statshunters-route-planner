@@ -86,13 +86,19 @@ def load_walk_graph(lat, lon, reach_km):
     return _GRAPH_MEMORY[str(path)]
 
 
+_NODE_INDEX_CACHE = {}
+
+
 def _node_index(graph):
     import numpy as np
 
-    nodes = list(graph.nodes)
-    lats = np.array([graph.nodes[n]["y"] for n in nodes])
-    lons = np.array([graph.nodes[n]["x"] for n in nodes])
-    return nodes, lats, lons
+    key = id(graph)
+    if key not in _NODE_INDEX_CACHE:
+        nodes = list(graph.nodes)
+        lats = np.array([graph.nodes[n]["y"] for n in nodes])
+        lons = np.array([graph.nodes[n]["x"] for n in nodes])
+        _NODE_INDEX_CACHE[key] = (nodes, lats, lons)
+    return _NODE_INDEX_CACHE[key]
 
 
 def nearest_node(node_index, lat, lon):
@@ -143,8 +149,22 @@ def _path_length_m(graph, node_path):
     ))
 
 
-def _exact_loop(graph, cache, start_node, waypoint_nodes):
-    order = [start_node] + waypoint_nodes + [start_node]
+def plan_walk(graph, from_lat, from_lon, to_lat, to_lon):
+    """Pesi/bezecky presun mezi dvema body po stejnem grafu jako behy."""
+    node_index = _node_index(graph)
+    node_a = nearest_node(node_index, from_lat, from_lon)
+    node_b = nearest_node(node_index, to_lat, to_lon)
+    length_m, path = _leg(graph, {}, node_a, node_b)
+    if path is None:
+        raise RuntimeError("No walkable path between the points")
+    return {
+        "km": round(float(length_m) / 1000, 2),
+        "coordinates": [(graph.nodes[n]["y"], graph.nodes[n]["x"]) for n in path],
+    }
+
+
+def _exact_loop(graph, cache, start_node, waypoint_nodes, end_node=None):
+    order = [start_node] + waypoint_nodes + [end_node if end_node is not None else start_node]
     total = 0.0
     full_path = []
     for a, b in zip(order, order[1:]):
@@ -156,19 +176,26 @@ def _exact_loop(graph, cache, start_node, waypoint_nodes):
     return total, full_path
 
 
-def _estimate_loop_m(start, seq):
-    points = [start] + [(item["lat"], item["lon"]) for item in seq] + [start]
+def _estimate_path_m(start, end, seq):
+    points = [start] + [(item["lat"], item["lon"]) for item in seq] + [end]
     straight = sum(
         haversine_m(*points[i], *points[i + 1]) for i in range(len(points) - 1)
     )
     return DETOUR_FACTOR * straight
 
 
-def _within_reach(candidates, start_lat, start_lon, max_m):
+def _reachable(lat, lon, start, end, max_m):
+    """Bod je v dosahu, kdyz se objizdka start -> bod -> end vejde do rozpoctu
+    (pro okruh start == end degeneruje na kruh)."""
+    detour = haversine_m(start[0], start[1], lat, lon) + haversine_m(lat, lon, end[0], end[1])
+    return detour <= max_m * 0.9
+
+
+def _within_reach(candidates, start, end, max_m):
     within = []
     for cand in candidates:
         lat, lon = tile_center(cand["tile"])
-        if haversine_m(start_lat, start_lon, lat, lon) <= max_m / 2 * 0.9:
+        if _reachable(lat, lon, start, end, max_m):
             within.append({"tile": tuple(cand["tile"]), "score": cand["score"], "lat": lat, "lon": lon})
         if len(within) >= MAX_CANDIDATES:
             break
@@ -196,7 +223,7 @@ def _candidate_groups(within):
     return groups
 
 
-def _square_completion_seeds(within, context, start_lat, start_lon, max_m):
+def _square_completion_seeds(within, context, start, end, max_m):
     """Seedy cilene na zvetseni max square: okna (side+1)^2 s nejvyse
     MAX_SQUARE_MISSING chybejicimi tiles, vsechny v dosahu. Jednotlive chybejici
     tiles maji samy o sobe nulovy square prinos (nesctitavost), takze by je
@@ -234,7 +261,7 @@ def _square_completion_seeds(within, context, start_lat, start_lon, max_m):
                     waypoints.append(by_tile[tile])
                     continue
                 lat, lon = tile_center(tile)
-                if haversine_m(start_lat, start_lon, lat, lon) > max_m / 2 * 0.9:
+                if not _reachable(lat, lon, start, end, max_m):
                     waypoints = None
                     break
                 waypoints.append({"tile": tile, "score": 0.0, "lat": lat, "lon": lon})
@@ -245,7 +272,7 @@ def _square_completion_seeds(within, context, start_lat, start_lon, max_m):
     return [waypoints for _, _, waypoints in seeds[:MAX_SQUARE_SEEDS]]
 
 
-def _greedy_fill(start, sequence, pool, max_m):
+def _greedy_fill(start, end, sequence, pool, max_m):
     """Cheapest insertion na odhadech: doplnuje kandidaty z poolu, dokud se
     odhad delky vejde pod max_m."""
     sequence = list(sequence)
@@ -258,7 +285,7 @@ def _greedy_fill(start, sequence, pool, max_m):
         best = None
         for pos in range(len(sequence) + 1):
             trial = sequence[:pos] + [cand] + sequence[pos:]
-            estimate = _estimate_loop_m(start, trial)
+            estimate = _estimate_path_m(start, end, trial)
             if estimate <= max_m and (best is None or estimate < best[0]):
                 best = (estimate, trial)
         if best:
@@ -267,7 +294,7 @@ def _greedy_fill(start, sequence, pool, max_m):
     return sequence
 
 
-def _route_details(graph, leg_cache, node_index, start_node, sequence, min_m, max_m, context):
+def _route_details(graph, leg_cache, node_index, start_node, sequence, min_m, max_m, context, end_node=None):
     """Exaktni trasa pro sekvenci waypointu + spolecny prinos protnutych tiles.
     Pri prekroceni max_m odpada nejslabsi waypoint."""
     from scoring import evaluate_tile_set
@@ -275,7 +302,7 @@ def _route_details(graph, leg_cache, node_index, start_node, sequence, min_m, ma
     sequence = list(sequence)
     while True:
         waypoint_nodes = [nearest_node(node_index, item["lat"], item["lon"]) for item in sequence]
-        length_m, node_path = _exact_loop(graph, leg_cache, start_node, waypoint_nodes)
+        length_m, node_path = _exact_loop(graph, leg_cache, start_node, waypoint_nodes, end_node)
         if node_path is None:
             return None
         node_tiles = {
@@ -305,28 +332,35 @@ def _variant_key(details):
     return (details["in_window"], details["benefit"]["total"], -details["length_m"])
 
 
-def plan_tile_loop(graph, start_lat, start_lon, target_km, tolerance_km, candidates, context):
-    """Okruh ze startu v delce target +- tolerance s nejvetsim spolecnym prinosem.
+def plan_tile_loop(graph, start_lat, start_lon, target_km, tolerance_km, candidates, context,
+                   end_lat=None, end_lon=None):
+    """Beh v delce target +- tolerance s nejvetsim spolecnym prinosem.
 
-    Porovnava varianty: rank-greedy seed + seedy kolem skupin sousednich kandidatu,
-    kazdou exaktne prepocita a ohodnoti spolecnym prinosem VSECH protnutych tiles
-    (evaluate_tile_set - zisky mnoziny, ne soucet skore). Vitez se jeste zkousi
-    vylepsit pridavanim nevyuzitych kandidatu.
+    Okruh (end == start, vychozi), nebo z bodu do bodu (end_lat/end_lon).
+    Porovnava varianty: rank-greedy seed + seedy kolem skupin sousednich kandidatu
+    + seedy na dokompletovani square, kazdou exaktne prepocita a ohodnoti
+    spolecnym prinosem VSECH protnutych tiles (evaluate_tile_set - zisky mnoziny,
+    ne soucet skore). Vitez se jeste zkousi vylepsit pridavanim kandidatu.
     """
     min_m = (target_km - tolerance_km) * 1000
     max_m = (target_km + tolerance_km) * 1000
     start = (start_lat, start_lon)
+    end = (end_lat, end_lon) if end_lat is not None else start
+    is_loop = end == start
 
-    within = _within_reach(candidates, start_lat, start_lon, max_m)
+    within = _within_reach(candidates, start, end, max_m)
     node_index = _node_index(graph)
     start_node = nearest_node(node_index, start_lat, start_lon)
+    end_node = None if is_loop else nearest_node(node_index, end[0], end[1])
     leg_cache = {}
 
     def details_for(sequence):
-        return _route_details(graph, leg_cache, node_index, start_node, sequence, min_m, max_m, context)
+        return _route_details(
+            graph, leg_cache, node_index, start_node, sequence, min_m, max_m, context, end_node
+        )
 
     variants = []
-    base = details_for(_greedy_fill(start, [], within, max_m))
+    base = details_for(_greedy_fill(start, end, [], within, max_m))
     if base:
         variants.append(base)
 
@@ -338,25 +372,25 @@ def plan_tile_loop(graph, start_lat, start_lon, target_km, tolerance_km, candida
         reverse=True,
     )[:MAX_GROUP_SEEDS]
     for group in groups:
-        seed = _greedy_fill(start, [], sorted(group, key=lambda m: -m["score"]), max_m)
+        seed = _greedy_fill(start, end, [], sorted(group, key=lambda m: -m["score"]), max_m)
         if not seed:
             continue
-        filled = _greedy_fill(start, seed, within, max_m)
+        filled = _greedy_fill(start, end, seed, within, max_m)
         details = details_for(filled)
         if details:
             variants.append(details)
 
-    for square_seed in _square_completion_seeds(within, context, start_lat, start_lon, max_m):
-        seed = _greedy_fill(start, [], sorted(square_seed, key=lambda m: -m["score"]), max_m)
+    for square_seed in _square_completion_seeds(within, context, start, end, max_m):
+        seed = _greedy_fill(start, end, [], sorted(square_seed, key=lambda m: -m["score"]), max_m)
         if len(seed) < len(square_seed):
             continue
-        filled = _greedy_fill(start, seed, within, max_m)
+        filled = _greedy_fill(start, end, seed, within, max_m)
         details = details_for(filled)
         if details:
             variants.append(details)
 
     if not variants:
-        raise RuntimeError("No walkable loop found from the start point")
+        raise RuntimeError("No walkable route found from the start point")
 
     best = max(variants, key=_variant_key)
 
@@ -367,7 +401,7 @@ def plan_tile_loop(graph, start_lat, start_lon, target_km, tolerance_km, candida
         for cand in pool:
             if len(best["sequence"]) >= MAX_WAYPOINTS:
                 break
-            trial = _greedy_fill(start, best["sequence"], [cand], max_m)
+            trial = _greedy_fill(start, end, best["sequence"], [cand], max_m)
             if len(trial) == len(best["sequence"]):
                 continue
             details = details_for(trial)
@@ -383,6 +417,8 @@ def plan_tile_loop(graph, start_lat, start_lon, target_km, tolerance_km, candida
         "tolerance_km": tolerance_km,
         "within_target": best["in_window"],
         "start": {"lat": start_lat, "lon": start_lon},
+        "end": {"lat": end[0], "lon": end[1]},
+        "is_loop": is_loop,
         "waypoint_tiles": [item["tile"] for item in best["sequence"]],
         "tiles_crossed": best["tiles_crossed"],
         "coordinates": best["coordinates"],

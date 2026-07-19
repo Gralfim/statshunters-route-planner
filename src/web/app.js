@@ -220,6 +220,8 @@ const routeDistance = document.querySelector('#route-distance');
 const routeTolerance = document.querySelector('#route-tolerance');
 const routeBudget = document.querySelector('#route-budget');
 const routePace = document.querySelector('#route-pace');
+const routeWeekend = document.querySelector('#route-weekend');
+routeWeekend.checked = [0, 6].includes(new Date().getDay());
 const routeStartText = document.querySelector('#route-start');
 const planButton = document.querySelector('#plan');
 const planExpeditionButton = document.querySelector('#plan-expedition');
@@ -335,12 +337,11 @@ function drawExpedition(expedition) {
   const bounds = [];
 
   for (const segment of expedition.segments) {
-    if (segment.type === 'walk' && segment.from) {
-      const line = [[segment.from.lat, segment.from.lon], [segment.to.lat, segment.to.lon]];
-      routeLayerGroup.addLayer(L.polyline(line, {
-        pane: 'routePane', color: '#53606f', weight: 2, dashArray: '2 6', opacity: 0.9
+    if (segment.type === 'walk' && segment.coordinates && segment.coordinates.length > 1) {
+      routeLayerGroup.addLayer(L.polyline(segment.coordinates, {
+        pane: 'routePane', color: '#53606f', weight: 2.5, dashArray: '2 6', opacity: 0.9
       }));
-      bounds.push(...line);
+      bounds.push(...segment.coordinates);
     }
     if (segment.type === 'transit') {
       for (const leg of segment.legs) {
@@ -410,7 +411,8 @@ async function planExpedition() {
         distance_km: Number(routeDistance.value),
         tolerance_km: Number(routeTolerance.value),
         budget_min: Number(routeBudget.value),
-        pace_min_per_km: Number(routePace.value)
+        pace_min_per_km: Number(routePace.value),
+        weekend: routeWeekend.checked
       })
     });
     const expedition = await response.json();
@@ -419,9 +421,12 @@ async function planExpedition() {
     lastRoute = expedition.route;
     drawExpedition(expedition);
     renderSegments(expedition);
-    const kind = expedition.kind === 'transit'
-      ? `pres ${expedition.alight.name}`
-      : 'bez MHD (okruh ze startu je nejvyhodnejsi)';
+    let kind = 'bez MHD (okruh ze startu je nejvyhodnejsi)';
+    if (expedition.kind === 'transit') {
+      const back = expedition.return_stop && expedition.return_stop.name !== expedition.alight.name
+        ? `, navrat z ${expedition.return_stop.name}` : '';
+      kind = `pres ${expedition.alight.name}${back}`;
+    }
     routeStatus.textContent = `Nejlepsi vyprava: ${kind}.`;
     renderBenefit(expedition.route);
     gpxButton.hidden = false;

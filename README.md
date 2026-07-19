@@ -179,15 +179,19 @@ funkce zatím nesčítá společný přínos množiny tiles.
 
 ## Výpravy s MHD
 
-Výprava = [běh na zastávku] → MHD → **okruh** → MHD → [běh domů], s rozpočtem na celkový
-čas (`expedition_budget_min`, výchozí 120 min). Pěší přesuny se počítají do kilometrů
-běhu; čas běhu se odhaduje tempem `run_pace_min_per_km`. Tlačítko **Naplanovat vypravu
-(s MHD)** v panelu; čistý okruh bez MHD je vždy jednou z porovnávaných variant.
+Výprava = [běh na zastávku] → MHD → **běh** → MHD → [běh domů], s rozpočtem na celkový
+čas (`expedition_budget_min`, výchozí 120 min). Pěší přesuny se plánují po stejném pěším
+grafu jako běhy a počítají se do kilometrů běhu; čas běhu se odhaduje tempem
+`run_pace_min_per_km`. Návrat může vést **z jiné zastávky** než výstup — běh pak cílovou
+oblast přejde z bodu do bodu, místo aby se vracel. Tlačítko **Naplanovat vypravu (s MHD)**
+v panelu; čistý okruh bez MHD je vždy jednou z porovnávaných variant.
 
 1. **Síť MHD** z veřejného GTFS feedu PID (`data/pid_gtfs.zip`, ~44 MB, stáhne se
    automaticky; kompaktní graf ~2 MB se cachuje v `data/transit_graph.json`). Časy jízdy
-   z jízdních řádů (reprezentativní spoj každé linky a směru), čekání paušálně podle
-   druhu dopravy (metro 2, tram 4, vlak 8, bus 6 min).
+   z jízdních řádů (reprezentativní spoj každé linky a směru); čekání = **polovina
+   intervalu linky** pro daný typ dne (všední den / víkend, medián rozestupů odjezdů
+   z GTFS calendar, ořez 1–20 min), kde interval není znám, paušál podle druhu dopravy.
+   Typ dne se v UI přepíná („Vikendove intervaly MHD", výchozí podle dnešního data).
 2. **Router spojení** minimalizuje primárně počet přestupů (penalizace 30 min), sekundárně
    čas vážený prioritou druhů: metro ×1,0 > tram ×1,15 > vlak ×1,25 > ostatní ×1,5.
 3. **Cílové oblasti**: lokální skupiny sousedících kandidátů (velké souvislé fronty se
@@ -197,9 +201,12 @@ běhu; čas běhu se odhaduje tempem `run_pace_min_per_km`. Tlačítko **Naplano
    vyřadí ty, ke kterým se v rozpočtu nedá dojet. Pro top oblasti se najde spojení
    na zastávku v doběhu oblasti a spočte časové okno pro okruh (zpáteční spojení se
    uvažuje symetrické).
-4. **Exaktní plán** se počítá pro čistý okruh + nejlepší 1–2 MHD kandidáty (přednost mají
-   zastávky s už staženým pěším grafem); vítěz podle skutečného přínosu okruhu. Odpověď
-   obsahuje segmenty s časy, spojení (linky, přestupy) a alternativní směry.
+4. **Exaktní plán** se počítá pro čistý okruh + nejlepší až 3 MHD kandidáty (přednost mají
+   zastávky s už staženým pěším grafem). Zpáteční zastávka se volí mezi zastávkami u cíle:
+   dobré spojení domů (cena ≤ nejlepší + 15 ekviv. min) a co nejdál od výstupu, aby běh
+   oblast přešel; pěší přesuny domov ↔ zastávka se počítají exaktně po grafu (kreslí se
+   tečkovaně). Vítěz podle skutečného přínosu běhu. Odpověď obsahuje segmenty s časy,
+   spojení (linky, přestupy) a alternativní směry.
 
 ## Stav vývoje (2026-07-18)
 

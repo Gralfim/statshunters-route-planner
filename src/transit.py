@@ -3,13 +3,15 @@
 Router minimalizuje primarne pocet prestupu, sekundarne cas vazeny prioritou
 dopravnich prostredku (metro > tramvaj > vlak > ostatni). Casy jizdy pochazeji
 z jizdnich radu (reprezentativni spoj kazde linky a smeru), cekani na spoj je
-pausalni podle druhu dopravy.
+polovina intervalu linky pro dany typ dne (vsedni den / vikend, z GTFS
+calendar); kde interval neni znamy, pouzije se pausal podle druhu dopravy.
 """
 import csv
 import heapq
 import io
 import json
 import math
+import statistics
 import urllib.request
 import zipfile
 from collections import defaultdict
@@ -19,14 +21,16 @@ ROOT = Path(__file__).resolve().parents[1]
 GTFS_ZIP = ROOT / "data" / "pid_gtfs.zip"
 GRAPH_CACHE = ROOT / "data" / "transit_graph.json"
 GTFS_URL = "https://data.pid.cz/PID_GTFS.zip"
+GRAPH_VERSION = 2
 
 # GTFS route_type -> nas druh dopravy
 MODES = {0: "tram", 1: "metro", 2: "train", 3: "bus"}
 
 # priorita druhu: nasobic casu jizdy (mensi = preferovany)
 MODE_MULTIPLIER = {"metro": 1.0, "tram": 1.15, "train": 1.25, "bus": 1.5, "other": 1.6}
-# pausalni cekani pri nastupu/prestupu (minuty)
+# pausalni cekani pri nastupu/prestupu (minuty) - fallback bez znameho intervalu
 MODE_WAIT_MIN = {"metro": 2.0, "tram": 4.0, "train": 8.0, "bus": 6.0, "other": 6.0}
+WAIT_MIN_CLAMP = (1.0, 20.0)  # cekani = interval/2, orezane do tohoto rozsahu
 TRANSFER_PENALTY_MIN = 30.0  # velka vaha = nejdriv minimalizuj prestupy
 TRANSFER_WALK_MAX_M = 250.0
 
@@ -59,9 +63,21 @@ def _read_csv(zip_file, name):
         yield from csv.DictReader(io.TextIOWrapper(raw, encoding="utf-8-sig"))
 
 
+def _median_headway(departures):
+    """Median rozestupu po sobe jdoucich odjezdu (minuty), orezany na 60."""
+    if len(departures) < 2:
+        return None
+    departures = sorted(departures)
+    gaps = [b - a for a, b in zip(departures, departures[1:]) if 0 < b - a <= 120]
+    if not gaps:
+        return None
+    return min(round(statistics.median(gaps), 1), 60.0)
+
+
 def build_transit_graph(gtfs_zip=GTFS_ZIP):
     """Z GTFS postavi kompaktni graf: zastavky + hrany po sobe jdoucich zastavek
-    reprezentativniho spoje kazde (linka, smer). Vysledek cachuje do JSON."""
+    reprezentativniho spoje kazde (linka, smer) + intervaly linek pro vsedni den
+    a vikend (median rozestupu odjezdu z vychozi zastavky). Cachuje do JSON."""
     zip_file = zipfile.ZipFile(gtfs_zip)
 
     routes = {}
@@ -72,33 +88,70 @@ def build_transit_graph(gtfs_zip=GTFS_ZIP):
             "mode": MODES.get(route_type, "other"),
         }
 
-    trip_key = {}
-    for row in _read_csv(zip_file, "trips.txt"):
-        if row["route_id"] in routes:
-            trip_key[row["trip_id"]] = (row["route_id"], row.get("direction_id") or "0")
-
-    representative = {}
-    for row in _read_csv(zip_file, "stop_times.txt"):
-        key = trip_key.get(row["trip_id"])
-        if key is None:
-            continue
-        chosen = representative.setdefault(key, row["trip_id"])
-        if chosen != row["trip_id"]:
-            continue
-        representative.setdefault("_sequences", {}).setdefault(row["trip_id"], []).append(
-            (int(row["stop_sequence"]), row["stop_id"], _parse_gtfs_time(row["arrival_time"]))
+    # service_id -> (jede ve vsedni den, jede v sobotu)
+    service_days = {}
+    for row in _read_csv(zip_file, "calendar.txt"):
+        service_days[row["service_id"]] = (
+            row.get("wednesday") == "1",
+            row.get("saturday") == "1",
         )
 
-    sequences = representative.pop("_sequences", {})
+    trip_key = {}
+    trip_service = {}
+    for row in _read_csv(zip_file, "trips.txt"):
+        if row["route_id"] in routes:
+            trip_id = row["trip_id"]
+            trip_key[trip_id] = (row["route_id"], row.get("direction_id") or "0")
+            trip_service[trip_id] = row.get("service_id")
+
+    representative = {}
+    sequences = {}
+    first_departure = {}
+    for row in _read_csv(zip_file, "stop_times.txt"):
+        trip_id = row["trip_id"]
+        key = trip_key.get(trip_id)
+        if key is None:
+            continue
+
+        sequence = int(row["stop_sequence"])
+        known = first_departure.get(trip_id)
+        if known is None or sequence < known[0]:
+            first_departure[trip_id] = (sequence, _parse_gtfs_time(row["departure_time"] or row["arrival_time"]))
+
+        if representative.setdefault(key, trip_id) != trip_id:
+            continue
+        sequences.setdefault(trip_id, []).append(
+            (sequence, row["stop_id"], _parse_gtfs_time(row["arrival_time"]))
+        )
+
+    # intervaly: odjezdy vsech spoju linky+smeru z vychozi zastavky podle typu dne
+    departures = defaultdict(lambda: ([], []))
+    for trip_id, (_seq, dep_min) in first_departure.items():
+        days = service_days.get(trip_service.get(trip_id))
+        if days is None:
+            continue
+        weekday_deps, weekend_deps = departures[trip_key[trip_id]]
+        if days[0]:
+            weekday_deps.append(dep_min)
+        if days[1]:
+            weekend_deps.append(dep_min)
+
+    headways = {}
+    for key, (weekday_deps, weekend_deps) in departures.items():
+        weekday = _median_headway(weekday_deps)
+        weekend = _median_headway(weekend_deps)
+        if weekday or weekend:
+            headways["|".join(key)] = [weekday, weekend]
 
     used_stops = set()
     edges = []
-    for (route_id, _direction), trip_id in representative.items():
+    for (route_id, direction), trip_id in representative.items():
         stops_in_trip = sorted(sequences.get(trip_id, []))
         route = routes[route_id]
+        line_key = f"{route_id}|{direction}"
         for (_, stop_a, time_a), (_, stop_b, time_b) in zip(stops_in_trip, stops_in_trip[1:]):
             minutes = max(time_b - time_a, 0.5)
-            edges.append([stop_a, stop_b, round(minutes, 2), route["name"], route["mode"]])
+            edges.append([stop_a, stop_b, round(minutes, 2), route["name"], route["mode"], line_key])
             used_stops.update((stop_a, stop_b))
 
     stops = {}
@@ -110,14 +163,16 @@ def build_transit_graph(gtfs_zip=GTFS_ZIP):
                 round(float(row["stop_lon"]), 6),
             ]
 
-    graph = {"stops": stops, "edges": edges}
+    graph = {"version": GRAPH_VERSION, "stops": stops, "edges": edges, "headways": headways}
     GRAPH_CACHE.write_text(json.dumps(graph), encoding="utf-8")
     return graph
 
 
 def load_transit_graph():
     if GRAPH_CACHE.exists():
-        return json.loads(GRAPH_CACHE.read_text(encoding="utf-8"))
+        graph = json.loads(GRAPH_CACHE.read_text(encoding="utf-8"))
+        if graph.get("version") == GRAPH_VERSION:
+            return graph
     if not GTFS_ZIP.exists():
         download_gtfs()
     return build_transit_graph()
@@ -126,9 +181,10 @@ def load_transit_graph():
 class TransitNetwork:
     def __init__(self, graph):
         self.stops = graph["stops"]
+        self.headways = graph.get("headways", {})
         self.adjacency = defaultdict(list)
-        for stop_a, stop_b, minutes, line, mode in graph["edges"]:
-            self.adjacency[stop_a].append((stop_b, minutes, line, mode))
+        for stop_a, stop_b, minutes, line, mode, line_key in graph["edges"]:
+            self.adjacency[stop_a].append((stop_b, minutes, line, mode, line_key))
 
         # prestupni vazby: zastavky stejneho jmena nebo do TRANSFER_WALK_MAX_M
         self.transfers = defaultdict(set)
@@ -162,12 +218,21 @@ class TransitNetwork:
                 found.append((distance, stop_id))
         return sorted(found)
 
-    def route(self, origin_stops, target_stops):
+    def wait_min(self, line_key, mode, day="weekday"):
+        """Ocekavane cekani = polovina intervalu linky pro dany typ dne."""
+        headway = self.headways.get(line_key)
+        value = headway[0 if day == "weekday" else 1] if headway else None
+        if value is None:
+            return MODE_WAIT_MIN.get(mode, 6.0)
+        low, high = WAIT_MIN_CLAMP
+        return min(max(value / 2, low), high)
+
+    def route(self, origin_stops, target_stops, day="weekday"):
         """Nejlepsi spojeni z mnoziny zastavek do mnoziny zastavek.
 
-        Cena = prestupy * TRANSFER_PENALTY_MIN + jizda * MODE_MULTIPLIER + cekani.
-        Stav dijkstry je (zastavka, linka), aby sly prestupy pocitat presne.
-        Vraci {minutes, cost, transfers, legs} nebo None.
+        Cena = prestupy * TRANSFER_PENALTY_MIN + jizda * MODE_MULTIPLIER + cekani
+        (interval/2 dle typu dne). Stav dijkstry je (zastavka, linka), aby sly
+        prestupy pocitat presne. Vraci {minutes, cost, transfers, legs} nebo None.
         """
         targets = set(target_stops)
         heap = []
@@ -191,21 +256,23 @@ class TransitNetwork:
                     "stop_id": stop,
                 }
 
-            for next_stop, ride_min, next_line, mode in self.adjacency[stop]:
+            for next_stop, ride_min, next_line, mode, line_key in self.adjacency[stop]:
                 boarding = line != next_line
                 extra_transfers = 1 if boarding and line is not None else 0
                 extra_cost = ride_min * MODE_MULTIPLIER.get(mode, 1.6)
                 extra_minutes = ride_min
+                wait = 0.0
                 if boarding:
-                    extra_cost += MODE_WAIT_MIN.get(mode, 6.0) + extra_transfers * TRANSFER_PENALTY_MIN
-                    extra_minutes += MODE_WAIT_MIN.get(mode, 6.0)
+                    wait = self.wait_min(line_key, mode, day)
+                    extra_cost += wait + extra_transfers * TRANSFER_PENALTY_MIN
+                    extra_minutes += wait
                 heapq.heappush(heap, (
                     cost + extra_cost,
                     minutes + extra_minutes,
                     transfers + extra_transfers,
                     next_stop,
                     next_line,
-                    path + ((next_line, mode, stop, next_stop, ride_min),),
+                    path + ((next_line, mode, stop, next_stop, ride_min, wait),),
                 ))
 
             for other in self.transfers[stop]:
@@ -215,7 +282,7 @@ class TransitNetwork:
 
     def _compress_legs(self, path):
         legs = []
-        for line, mode, stop_from, stop_to, ride_min in path:
+        for line, mode, stop_from, stop_to, ride_min, wait in path:
             if legs and legs[-1]["line"] == line:
                 legs[-1]["to"] = self.stops[stop_to][0]
                 legs[-1]["to_id"] = stop_to
@@ -235,6 +302,6 @@ class TransitNetwork:
                     "to_lat": self.stops[stop_to][1],
                     "to_lon": self.stops[stop_to][2],
                     "stops": 1,
-                    "minutes": round(ride_min + MODE_WAIT_MIN.get(mode, 6.0), 1),
+                    "minutes": round(ride_min + wait, 1),
                 })
         return legs
