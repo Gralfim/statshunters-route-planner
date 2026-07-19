@@ -209,6 +209,8 @@ async function loadSummary() {
   renderLegend();
   routeDistance.value = summary.target_distance_km;
   routeTolerance.value = summary.distance_tolerance_km;
+  routeBudget.value = summary.expedition_budget_min;
+  routePace.value = summary.run_pace_min_per_km;
   setStart(summary.home.lat, summary.home.lon);
   await drawCheckedOverlays();
   await fitToAllTiles(summary);
@@ -216,11 +218,15 @@ async function loadSummary() {
 
 const routeDistance = document.querySelector('#route-distance');
 const routeTolerance = document.querySelector('#route-tolerance');
+const routeBudget = document.querySelector('#route-budget');
+const routePace = document.querySelector('#route-pace');
 const routeStartText = document.querySelector('#route-start');
 const planButton = document.querySelector('#plan');
+const planExpeditionButton = document.querySelector('#plan-expedition');
 const gpxButton = document.querySelector('#gpx');
 const routeStatus = document.querySelector('#route-status');
 const routeBenefit = document.querySelector('#route-benefit');
+const routeSegments = document.querySelector('#route-segments');
 
 const GAIN_LABELS = {
   all_square: 'square celkem',
@@ -281,6 +287,7 @@ async function planRoute() {
   routeStatus.textContent = 'Porovnavam varianty trasy... v nove oblasti muze prvni vypocet trvat i minuty (stahovani pesi mapy).';
   gpxButton.hidden = true;
   routeBenefit.hidden = true;
+  routeSegments.hidden = true;
 
   try {
     const response = await fetch('/api/route', {
@@ -320,6 +327,114 @@ async function planRoute() {
 }
 
 planButton.addEventListener('click', planRoute);
+
+const MODE_LABELS = { metro: 'metro', tram: 'tram', train: 'vlak', bus: 'bus', other: 'MHD' };
+
+function drawExpedition(expedition) {
+  routeLayerGroup.clearLayers();
+  const bounds = [];
+
+  for (const segment of expedition.segments) {
+    if (segment.type === 'walk' && segment.from) {
+      const line = [[segment.from.lat, segment.from.lon], [segment.to.lat, segment.to.lon]];
+      routeLayerGroup.addLayer(L.polyline(line, {
+        pane: 'routePane', color: '#53606f', weight: 2, dashArray: '2 6', opacity: 0.9
+      }));
+      bounds.push(...line);
+    }
+    if (segment.type === 'transit') {
+      for (const leg of segment.legs) {
+        const line = [[leg.from_lat, leg.from_lon], [leg.to_lat, leg.to_lon]];
+        routeLayerGroup.addLayer(L.polyline(line, {
+          pane: 'routePane', color: '#53606f', weight: 3, dashArray: '8 8', opacity: 0.85
+        }));
+        bounds.push(...line);
+      }
+    }
+  }
+
+  const run = expedition.route.coordinates;
+  routeLayerGroup.addLayer(L.polyline(run, {
+    pane: 'routePane', color: '#ffffff', weight: 7, opacity: 0.9
+  }));
+  routeLayerGroup.addLayer(L.polyline(run, {
+    pane: 'routePane', color: '#111827', weight: 3.5, opacity: 0.95
+  }));
+  bounds.push(...run);
+  map.fitBounds(L.latLngBounds(bounds), { padding: [40, 40] });
+}
+
+function renderSegments(expedition) {
+  const lines = expedition.segments.map(segment => {
+    if (segment.type === 'walk') {
+      return `Beh na prestup: ${segment.km} km (${segment.min} min)`;
+    }
+    if (segment.type === 'transit') {
+      const legs = segment.legs
+        .map(leg => `${MODE_LABELS[leg.mode] || leg.mode} ${leg.line} (${leg.stops} zast.)`)
+        .join(' -> ');
+      return `MHD ${segment.desc}: ${legs}, ${segment.min} min`;
+    }
+    return `Beh: ${segment.km} km (${segment.min} min)`;
+  });
+
+  const alternatives = (expedition.alternatives || [])
+    .slice(0, 4)
+    .map(alt => `${alt.alight} (${alt.lines.join('+')}, ${alt.transit_min} min, prinos ~${Math.round(alt.benefit_estimate)})`)
+    .join('<br>');
+
+  routeSegments.innerHTML = `<strong>Vyprava ${expedition.total_min} min / rozpocet ${expedition.budget_min} min`
+    + `${expedition.within_budget ? '' : ' (PRES ROZPOCET!)'} - beh celkem ${expedition.run_km} km</strong><br>`
+    + lines.map((line, index) => `${index + 1}. ${line}`).join('<br>')
+    + (alternatives ? `<br><br>Dalsi smery:<br>${alternatives}` : '');
+  routeSegments.hidden = false;
+}
+
+async function planExpedition() {
+  const position = startMarker.getLatLng();
+  planExpeditionButton.disabled = true;
+  planExpeditionButton.textContent = 'Planuji vypravu...';
+  routeStatus.style.color = '#53606f';
+  routeStatus.textContent = 'Hledam spojeni a porovnavam vypravy... v nove oblasti to muze trvat i minuty.';
+  gpxButton.hidden = true;
+  routeBenefit.hidden = true;
+  routeSegments.hidden = true;
+
+  try {
+    const response = await fetch('/api/expedition', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        lat: position.lat,
+        lon: position.lng,
+        distance_km: Number(routeDistance.value),
+        tolerance_km: Number(routeTolerance.value),
+        budget_min: Number(routeBudget.value),
+        pace_min_per_km: Number(routePace.value)
+      })
+    });
+    const expedition = await response.json();
+    if (!response.ok) throw new Error(expedition.detail || response.statusText);
+
+    lastRoute = expedition.route;
+    drawExpedition(expedition);
+    renderSegments(expedition);
+    const kind = expedition.kind === 'transit'
+      ? `pres ${expedition.alight.name}`
+      : 'bez MHD (okruh ze startu je nejvyhodnejsi)';
+    routeStatus.textContent = `Nejlepsi vyprava: ${kind}.`;
+    renderBenefit(expedition.route);
+    gpxButton.hidden = false;
+  } catch (error) {
+    routeStatus.style.color = '#b91c1c';
+    routeStatus.textContent = `Planovani vypravy selhalo: ${error.message}`;
+  } finally {
+    planExpeditionButton.disabled = false;
+    planExpeditionButton.textContent = 'Naplanovat vypravu (s MHD)';
+  }
+}
+
+planExpeditionButton.addEventListener('click', planExpedition);
 
 gpxButton.addEventListener('click', () => {
   if (!lastRoute) return;

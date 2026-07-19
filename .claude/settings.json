@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s -I -m 20 \"https://data.pid.cz/PID_GTFS.zip\")",
+      "Bash(curl -s -m 20 -r 0-100 \"https://data.pid.cz/PID_GTFS.zip\" -o /dev/null -w \"partial GET: HTTP %{http_code}, speed %{speed_download} B/s\\\\n\")",
+      "Bash(curl -s -m 400 -o data/pid_gtfs.zip \"https://data.pid.cz/PID_GTFS.zip\")",
+      "Bash(python -c ' *)",
+      "Bash(python -X utf8 \"D:\\\\Users\\\\Gralfim\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--AIDev-statshunters-route-planner\\\\52452d13-d53a-4ce7-a729-53e56187079c\\\\scratchpad\\\\test_transit.py\")",
+      "Bash(python -X utf8 -c ' *)",
+      "Bash(python -c \"import sys; sys.path.insert\\(0,'src'\\); import api; print\\('api import OK'\\)\")",
+      "Bash(python -X utf8 \"D:\\\\Users\\\\Gralfim\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--AIDev-statshunters-route-planner\\\\52452d13-d53a-4ce7-a729-53e56187079c\\\\scratchpad\\\\test_expedition.py\")"
+    ]
+  }
+}

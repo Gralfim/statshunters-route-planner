@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from cluster import find_largest_cluster
+from expedition import build_targets, plan_expedition
 from frontier import frontier_tiles
 from geojson import feature_collection, tile_feature, tile_outline_feature_collection
 from load import load_activities
@@ -16,6 +17,7 @@ from scoring import build_route_context, find_tile_opportunities
 from square import find_largest_square
 from statshunters import resolve_share_link, sync_activities
 from tiles import build_tile_database
+from transit import TransitNetwork, load_transit_graph
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -134,6 +136,8 @@ def summary():
         "home": config["home"],
         "target_distance_km": config["target_distance_km"],
         "distance_tolerance_km": config["distance_tolerance_km"],
+        "expedition_budget_min": config.get("expedition_budget_min", 120),
+        "run_pace_min_per_km": config.get("run_pace_min_per_km", 6.0),
         "periods": periods,
     }
 
@@ -189,6 +193,16 @@ def get_route_context():
         "year": get_period_tile_database("year"),
         "recent": get_period_tile_database("recent"),
     })
+
+
+@lru_cache
+def get_transit_network():
+    return TransitNetwork(load_transit_graph())
+
+
+@lru_cache
+def get_expedition_targets():
+    return build_targets(get_opportunities(), get_route_context())
 
 
 @app.get("/api/opportunities")
@@ -251,6 +265,48 @@ def plan_route(request: RouteRequest):
     return route
 
 
+class ExpeditionRequest(BaseModel):
+    lat: float | None = None
+    lon: float | None = None
+    distance_km: float | None = None
+    tolerance_km: float | None = None
+    budget_min: float | None = None
+    pace_min_per_km: float | None = None
+
+
+@app.post("/api/expedition")
+def plan_expedition_endpoint(request: ExpeditionRequest):
+    config = get_config()
+    lat = request.lat if request.lat is not None else config["home"]["lat"]
+    lon = request.lon if request.lon is not None else config["home"]["lon"]
+    distance_km = request.distance_km if request.distance_km is not None else config["target_distance_km"]
+    tolerance_km = request.tolerance_km if request.tolerance_km is not None else config["distance_tolerance_km"]
+    budget_min = request.budget_min if request.budget_min is not None else config.get("expedition_budget_min", 120)
+    pace = request.pace_min_per_km if request.pace_min_per_km is not None else config.get("run_pace_min_per_km", 6.0)
+
+    if not 2 <= distance_km <= 42:
+        raise HTTPException(status_code=400, detail="Delka trasy musi byt 2 az 42 km")
+    if not 0.2 <= tolerance_km <= distance_km / 2:
+        raise HTTPException(status_code=400, detail="Tolerance musi byt 0.2 km az polovina delky")
+    if not 20 <= budget_min <= 360:
+        raise HTTPException(status_code=400, detail="Rozpocet vypravy musi byt 20 az 360 minut")
+    if not 3 <= pace <= 12:
+        raise HTTPException(status_code=400, detail="Tempo musi byt 3 az 12 min/km")
+
+    try:
+        plan = plan_expedition(
+            lat, lon, distance_km, tolerance_km, budget_min, pace,
+            get_opportunities(), get_route_context(), get_transit_network(), get_expedition_targets(),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Planovani vypravy selhalo: {exc}")
+
+    plan["route"]["gpx"] = route_to_gpx(plan["route"]["coordinates"])
+    return plan
+
+
 @app.post("/api/sync")
 def sync_data():
     share_link = resolve_share_link(get_config())
@@ -272,6 +328,7 @@ def sync_data():
     get_period_tile_database.cache_clear()
     get_opportunities.cache_clear()
     get_route_context.cache_clear()
+    get_expedition_targets.cache_clear()
     return result
 
 

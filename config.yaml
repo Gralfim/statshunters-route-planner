@@ -4,6 +4,8 @@ home:
   lon: 14.4188
 target_distance_km: 15
 distance_tolerance_km: 3
+run_pace_min_per_km: 6.0
+expedition_budget_min: 120
 statshunters:
   # https://www.statshunters.com/share/<kod> nebo jen <kod>;
   # lze zadat i pres promennou prostredi STATSHUNTERS_SHARE_LINK

@@ -137,10 +137,10 @@ def _trim_spurs(node_tiles, node_path):
 
 
 def _path_length_m(graph, node_path):
-    return sum(
+    return float(sum(
         min(edge["length"] for edge in graph[u][v].values())
         for u, v in zip(node_path, node_path[1:])
-    )
+    ))
 
 
 def _exact_loop(graph, cache, start_node, waypoint_nodes):

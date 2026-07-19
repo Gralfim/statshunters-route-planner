@@ -36,8 +36,10 @@ html,body,#map{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI
 #route .route-inputs{display:grid;grid-template-columns:1fr 1fr;gap:6px}
 #route .route-inputs label{display:grid;gap:2px;font-size:11px;color:#53606f;text-transform:uppercase}
 #route input{padding:5px 6px;border:1px solid #d7dde3;border-radius:4px;font-size:14px;width:100%;box-sizing:border-box}
-#plan{padding:8px;border:0;border-radius:6px;background:#111827;color:#fff;font-weight:600;cursor:pointer}
-#plan:disabled{background:#9aa2af;cursor:wait}
+#plan,#plan-expedition{padding:8px;border:0;border-radius:6px;background:#111827;color:#fff;font-weight:600;cursor:pointer}
+#plan:disabled,#plan-expedition:disabled{background:#9aa2af;cursor:wait}
+#plan-expedition{background:#4a3aa7}
+#route-segments{font-size:12px;color:#1a202c;background:#f4f6f8;border-radius:6px;padding:8px;line-height:1.5}
 #gpx{padding:7px;border:1px solid #111827;border-radius:6px;background:#fff;color:#111827;font-weight:600;cursor:pointer}
 #route-status,#route-start{font-size:12px;color:#53606f}
 #route-benefit{font-size:12px;color:#1a202c;background:#f4f6f8;border-radius:6px;padding:8px;line-height:1.5}
@@ -64,10 +66,16 @@ html,body,#map{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI
       <label>Delka (km)<input id="route-distance" type="number" min="2" max="42" step="0.5"></label>
       <label>Tolerance (km)<input id="route-tolerance" type="number" min="0.5" max="10" step="0.5"></label>
     </div>
+    <div class="route-inputs">
+      <label>Cas vypravy (min)<input id="route-budget" type="number" min="20" max="360" step="10"></label>
+      <label>Tempo (min/km)<input id="route-pace" type="number" min="3" max="12" step="0.5"></label>
+    </div>
     <div id="route-start"></div>
     <button id="plan">Naplanovat trasu</button>
+    <button id="plan-expedition">Naplanovat vypravu (s MHD)</button>
     <div id="route-status"></div>
     <div id="route-benefit" hidden></div>
+    <div id="route-segments" hidden></div>
     <button id="gpx" hidden>Stahnout GPX</button>
   </div>
   <button id="sync">Aktualizovat data ze StatsHunters</button>

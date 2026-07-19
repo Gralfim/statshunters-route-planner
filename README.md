@@ -56,6 +56,8 @@ home:                  # výchozí bod tras
   lon: 14.4188
 target_distance_km: 15       # cílová délka trasy
 distance_tolerance_km: 3     # tolerance ±
+run_pace_min_per_km: 6.0     # tempo běhu (pro časový rozpočet výprav)
+expedition_budget_min: 120   # výchozí časový rozpočet celé výpravy
 statshunters:
   share_link: ""             # https://www.statshunters.com/share/<kod> nebo jen <kod>
 ```
@@ -105,6 +107,7 @@ aby nepřekrývaly popupy tiles a doporučení.
 | `GET /api/periods/{period}/square` | obrys největšího čtverce |
 | `GET /api/opportunities` | doporučené tiles seřazené podle skóre (rank, důvody, přínosy, stáří poslední návštěvy) |
 | `POST /api/route` | naplánuje okruh; JSON body `{lat, lon, distance_km, tolerance_km}` (vše volitelné, výchozí z configu); vrací délku, waypointy, protnuté tiles, souřadnice i GPX |
+| `POST /api/expedition` | naplánuje celou výpravu (běh + volitelně MHD); body navíc `{budget_min, pace_min_per_km}`; vrací segmenty (běh na zastávku / MHD / okruh / návrat), časy a alternativní směry |
 | `POST /api/sync` | stáhne čerstvá data ze StatsHunters, přepíše `data/` a vyčistí cache |
 | `GET /api/tiles`, `/api/frontier`, … | aliasy pro období `all` |
 
@@ -174,13 +177,38 @@ Známá omezení prototypu: GPX vede po uzlech grafu (rovné čáry mezi křižo
 navigaci doplnit geometrie hran), okruh se nevyhýbá zpáteční cestě stejnou ulicí a cílová
 funkce zatím nesčítá společný přínos množiny tiles.
 
+## Výpravy s MHD
+
+Výprava = [běh na zastávku] → MHD → **okruh** → MHD → [běh domů], s rozpočtem na celkový
+čas (`expedition_budget_min`, výchozí 120 min). Pěší přesuny se počítají do kilometrů
+běhu; čas běhu se odhaduje tempem `run_pace_min_per_km`. Tlačítko **Naplanovat vypravu
+(s MHD)** v panelu; čistý okruh bez MHD je vždy jednou z porovnávaných variant.
+
+1. **Síť MHD** z veřejného GTFS feedu PID (`data/pid_gtfs.zip`, ~44 MB, stáhne se
+   automaticky; kompaktní graf ~2 MB se cachuje v `data/transit_graph.json`). Časy jízdy
+   z jízdních řádů (reprezentativní spoj každé linky a směru), čekání paušálně podle
+   druhu dopravy (metro 2, tram 4, vlak 8, bus 6 min).
+2. **Router spojení** minimalizuje primárně počet přestupů (penalizace 30 min), sekundárně
+   čas vážený prioritou druhů: metro ×1,0 > tram ×1,15 > vlak ×1,25 > ostatní ×1,5.
+3. **Cílové oblasti**: lokální skupiny sousedících kandidátů (velké souvislé fronty se
+   dělí mřížkou) **plus okna na dokompletování max square** (globální scan přes
+   integrální obraz — chybějící tiles okna bývají rozptýlené a skupinové cíle by je
+   nezachytily). Oblasti se řadí podle společného přínosu; předfiltr dosažitelnosti
+   vyřadí ty, ke kterým se v rozpočtu nedá dojet. Pro top oblasti se najde spojení
+   na zastávku v doběhu oblasti a spočte časové okno pro okruh (zpáteční spojení se
+   uvažuje symetrické).
+4. **Exaktní plán** se počítá pro čistý okruh + nejlepší 1–2 MHD kandidáty (přednost mají
+   zastávky s už staženým pěším grafem); vítěz podle skutečného přínosu okruhu. Odpověď
+   obsahuje segmenty s časy, spojení (linky, přestupy) a alternativní směry.
+
 ## Stav vývoje (2026-07-18)
 
 **Hotové (commitnuté):** mapa s tiles pro 3 časová období, obrysy max clusteru a max square, panel se statistikami, scoring doporučených tiles (`/api/opportunities`).
 
 **Nové (zatím necommitnuté):**
 - plánování okruhů (`src/routing.py` + `POST /api/route` + UI v mapě) — špendlík startu, délka/tolerance v panelu, vykreslení trasy, GPX ke stažení; po warm-upu přeplánování 0,3–1,7 s,
-- **optimalizace společného přínosu**: trasa se vybírá porovnáním variant podle skutečného zisku statistik celé množiny protnutých tiles; square vážený plochou + seedy na dokompletování square (ověřený postup zlepšení z Karlova nám.: greedy 18,6 → portfolio 36,9 → square-aware 96,6, trasa 4×4 → 5×5 přes Košíře); rozpad přínosu se zobrazuje v panelu.
+- **optimalizace společného přínosu**: trasa se vybírá porovnáním variant podle skutečného zisku statistik celé množiny protnutých tiles; square vážený plochou + seedy na dokompletování square (ověřený postup zlepšení z Karlova nám.: greedy 18,6 → portfolio 36,9 → square-aware 96,6, trasa 4×4 → 5×5 přes Košíře); rozpad přínosu se zobrazuje v panelu,
+- **výpravy s MHD** (`src/transit.py` + `src/expedition.py` + `POST /api/expedition` + tlačítko v UI) — ověřeno E2E: z Karlova nám. při 15±3 km / 120 min vyhrála výprava metro A + bus 350 do Roztok (benefit 1371 vs. 96,6 čistého okruhu, 3 nové tiles, 117,7 min); při 12±3 km / 150 min vlak T7 do Dobřichovic (0 přestupů) s dokompletováním **celkového square 15×15 → 16×16** (benefit 17 138, 148,4 min) — shoduje se s intuicí uživatele (Černošice/Solopisky), která na 120 min opravdu nevychází.
 
 **Empirické zjištění (07/2026):** v doběhovém dosahu z Karlova náměstí (~8 km) je už všechno
 navštívené i letos — lokálně jde zlepšovat jen 3měsíční metriky. Velké zisky (nové tiles,
@@ -191,7 +219,7 @@ dopravu — to dává prioritu bodu „Dosažitelnost MHD" níže.
 
 1. **Asynchronní příprava nové oblasti** — `POST /api/route` v úplně nové oblasti blokuje na minuty (Overpass download) a hrozí timeout prohlížeče; převést na úlohu na pozadí s hlášením průběhu do UI.
 2. **Kvalita okruhu** — společný přínos množiny i ořez slepých ocásků jsou hotové; zbývá: penalizace průchodu stejnou ulicí oběma směry na různých úsecích okruhu, GPX z geometrií hran (ne jen uzlů), preference typů cest (parky/stezky vs. ulice — vážení hran podle OSM tagů highway/surface). Náklady na dopravu odečítat **jednou za trasu**, nikdy per tile.
-3. **Dosažitelnost MHD** — start/cíl u zastávky MHD jako alternativa okruhu z domova. Jen jako filtr nebo route-level náklad, ne jako složka skóre tile.
+3. **Výpravy s MHD — další iterace** — v1 hotová (viz výše); zbývá: nesymetrický návrat (jiná zastávka / jiné spojení zpět), běh z bodu do bodu (MHD tam, doběh domů nebo na jinou zastávku), reálné intervaly linek místo paušálního čekání (GTFS frequencies), přesnost pěších přesunů (teď vzdušná čára × 1,3). Náklady na dopravu zůstávají route-level, nikdy ve skóre tile.
 4. **Výkon `/api/opportunities`** — `_measure_gain` přepočítává celý cluster/square pro každého kandidáta; s růstem dat zvážit inkrementální výpočet a persistentní cache (teď jen `lru_cache` do restartu).
 5. **Testy** — v repu zatím žádné; pytest pro `cluster`, `square`, `scoring`, `routing` (čisté funkce), `statshunters` (sync klient má přepsatelnou `STATSHUNTERS_BASE_URL`, takže jde testovat proti lokálnímu falešnému serveru).
 6. **Drobnosti:** sjednotit duplicitní frontier logiku (`frontier.py` vs. `_frontier_tiles` ve `scoring.py`), konfigurovatelný typ aktivity, UI filtr top-N doporučení.
