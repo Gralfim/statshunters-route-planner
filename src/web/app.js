@@ -246,9 +246,13 @@ function renderBenefit(route) {
   const parts = Object.entries(route.benefit.gains)
     .filter(([, gain]) => gain > 0)
     .map(([key, gain]) => `+${gain} ${GAIN_LABELS[key] || key}`);
+  const repeated = route.repeated_km > 0
+    ? `<br>opakovani ulic: ${route.repeated_km} km`
+    : '<br>bez opakovani ulic';
   routeBenefit.innerHTML = `<strong>Prinos trasy (score ${route.benefit.total})</strong><br>`
     + (parts.length ? parts.join('<br>') : 'Zadne zlepseni statistik')
-    + `<br>stari navstev: +${route.benefit.staleness}`;
+    + `<br>stari navstev: +${route.benefit.staleness}`
+    + repeated;
   routeBenefit.hidden = false;
 }
 const routeLayerGroup = L.layerGroup().addTo(map);

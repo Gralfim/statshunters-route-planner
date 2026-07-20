@@ -13,6 +13,14 @@ MAX_SQUARE_SEEDS = 4
 MAX_SQUARE_MISSING = 4
 IMPROVE_ROUNDS = 2
 IMPROVE_MOVES_PER_ROUND = 10
+# Penalizace opakovaneho pruchodu stejnou ulici. Pri hledani useku se uz pouzita
+# hrana zdrazi (REUSE_PENALTY x run_cost), takze se dalsi usek vraci jinudy.
+# Opakovani je MEKKA slozka cilove funkce: skore = prinos - REPEAT_PENALTY_PER_KM
+# x opakovane_km. Prinos zustava dominantni (vaha na urovni ~1 tile za km), takze
+# opakovani rozhoduje mezi jinak srovnatelnymi trasami a nikdy neobetuje vyrazny
+# prinos - v souladu se zasadou "prinos king".
+REUSE_PENALTY = 4.0
+REPEAT_PENALTY_PER_KM = 2.0
 
 
 def haversine_m(lat1, lon1, lat2, lon2):
@@ -158,6 +166,20 @@ def _best_edge(graph, u, v):
     return min(graph[u][v].values(), key=lambda edge: edge.get("run_cost", edge["length"]))
 
 
+def _edge_id(u, v):
+    """Neorientovana identita ulice (usek mezi dvema krizovatkami)."""
+    return (u, v) if u <= v else (v, u)
+
+
+def _reuse_weight(used_edges):
+    """Vaha pro dijkstru penalizujici hrany uz pouzite na trase."""
+    def weight(u, v, edges):
+        best = min(edges.values(), key=lambda edge: edge.get("run_cost", edge["length"]))
+        cost = best.get("run_cost", best["length"])
+        return cost * REUSE_PENALTY if _edge_id(u, v) in used_edges else cost
+    return weight
+
+
 def _leg(graph, cache, a, b):
     """Nejlepsi usek podle run_cost (preference typu cest); vraci REALNOU delku."""
     import networkx as nx
@@ -170,6 +192,28 @@ def _leg(graph, cache, a, b):
             length, path = math.inf, None
         cache[(a, b)] = (length, path)
     return cache[(a, b)]
+
+
+def _leg_avoiding(graph, a, b, used_edges):
+    """Usek a->b, ktery se vyhyba uz pouzitym hranam (zdrazenym REUSE_PENALTY)."""
+    import networkx as nx
+
+    try:
+        _cost, path = nx.bidirectional_dijkstra(graph, a, b, weight=_reuse_weight(used_edges))
+    except nx.NetworkXNoPath:
+        return math.inf, None
+    return _path_length_m(graph, path), path
+
+
+def _repeated_m(graph, node_path):
+    """Metry hran pouzitych na trase vicekrat (druhy+ pruchod stejnou ulici)."""
+    from collections import Counter
+
+    counts = Counter(_edge_id(u, v) for u, v in zip(node_path, node_path[1:]))
+    return float(sum(
+        _best_edge(graph, u, v)["length"] * (count - 1)
+        for (u, v), count in counts.items() if count > 1
+    ))
 
 
 def _trim_spurs(node_tiles, node_path):
@@ -239,16 +283,22 @@ def plan_walk(graph, from_lat, from_lon, to_lat, to_lon):
     }
 
 
-def _exact_loop(graph, cache, start_node, waypoint_nodes, end_node=None):
+def _exact_loop(graph, cache, start_node, waypoint_nodes, end_node=None, avoid_reuse=False):
     order = [start_node] + waypoint_nodes + [end_node if end_node is not None else start_node]
     total = 0.0
     full_path = []
+    used_edges = set()
     for a, b in zip(order, order[1:]):
-        length, path = _leg(graph, cache, a, b)
+        if avoid_reuse:
+            length, path = _leg_avoiding(graph, a, b, used_edges)
+        else:
+            length, path = _leg(graph, cache, a, b)
         if path is None:
             return math.inf, None
         total += length
         full_path.extend(path if not full_path else path[1:])
+        if avoid_reuse:
+            used_edges.update(_edge_id(u, v) for u, v in zip(path, path[1:]))
     return total, full_path
 
 
@@ -372,15 +422,19 @@ def _greedy_fill(start, end, sequence, pool, max_m):
     return sequence
 
 
-def _route_details(graph, leg_cache, node_index, start_node, sequence, min_m, max_m, context, end_node=None):
+def _route_details(graph, leg_cache, node_index, start_node, sequence, min_m, max_m, context,
+                   end_node=None, avoid_reuse=False):
     """Exaktni trasa pro sekvenci waypointu + spolecny prinos protnutych tiles.
-    Pri prekroceni max_m odpada nejslabsi waypoint."""
+    Pri prekroceni max_m odpada nejslabsi waypoint. avoid_reuse penalizuje
+    opakovany pruchod stejnou ulici."""
     from scoring import evaluate_tile_set
 
     sequence = list(sequence)
     while True:
         waypoint_nodes = [nearest_node(node_index, item["lat"], item["lon"]) for item in sequence]
-        length_m, node_path = _exact_loop(graph, leg_cache, start_node, waypoint_nodes, end_node)
+        length_m, node_path = _exact_loop(
+            graph, leg_cache, start_node, waypoint_nodes, end_node, avoid_reuse
+        )
         if node_path is None:
             return None
         node_tiles = {
@@ -403,11 +457,17 @@ def _route_details(graph, leg_cache, node_index, start_node, sequence, min_m, ma
         "tiles_crossed": sorted(crossed),
         "benefit": evaluate_tile_set(crossed, context),
         "in_window": min_m <= length_m <= max_m,
+        "repeated_m": _repeated_m(graph, node_path),
     }
 
 
+def _variant_score(details):
+    """Cilova funkce trasy: prinos snizeny o mekkou penalizaci opakovanych ulic."""
+    return details["benefit"]["total"] - REPEAT_PENALTY_PER_KM * details["repeated_m"] / 1000
+
+
 def _variant_key(details):
-    return (details["in_window"], details["benefit"]["total"], -details["length_m"])
+    return (details["in_window"], _variant_score(details), -details["length_m"])
 
 
 def plan_tile_loop(graph, start_lat, start_lon, target_km, tolerance_km, candidates, context,
@@ -489,6 +549,17 @@ def plan_tile_loop(graph, start_lat, start_lon, target_km, tolerance_km, candida
         if not improved:
             break
 
+    # Finalni prepocet vitezne trasy s aktivnim vyhybanim opakovanym ulicim.
+    # Prijmi, kdyz zustane v okne a zlepsi cilovou funkci (mensi opakovani smi
+    # vyvazit jen maly pokles prinosu - viz _variant_score).
+    if best["sequence"] and best["repeated_m"] > 0:
+        refined = _route_details(
+            graph, leg_cache, node_index, start_node, best["sequence"],
+            min_m, max_m, context, end_node, avoid_reuse=True,
+        )
+        if refined and _variant_key(refined) > _variant_key(best):
+            best = refined
+
     return {
         "length_km": round(best["length_m"] / 1000, 2),
         "target_km": target_km,
@@ -501,6 +572,7 @@ def plan_tile_loop(graph, start_lat, start_lon, target_km, tolerance_km, candida
         "tiles_crossed": best["tiles_crossed"],
         "coordinates": best["coordinates"],
         "benefit": best["benefit"],
+        "repeated_km": round(best["repeated_m"] / 1000, 2),
         "variants_compared": len(variants),
     }
 

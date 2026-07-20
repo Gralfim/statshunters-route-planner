@@ -169,6 +169,12 @@ Jak to funguje:
 3. **Ořez ocásků**: slepé úseky tam-a-zpět (dijkstra vede trasu až k uzlu u středu
    tile, ale tile se počítá už prvním vstupem) se zkracují na nejmenší délku, která
    zachová množinu protnutých tiles — přínos se nemění, hluchá vzdálenost mizí.
+   Navíc se **penalizuje průchod stejnou ulicí**: hrana už použitá na trase se při
+   plánování dalšího úseku zdraží, takže se okruh vrací jinudy. Opakování je měkká
+   složka cílové funkce (skóre = přínos − 2 × opakované km): rozhoduje mezi jinak
+   srovnatelnými trasami, ale neobětuje výrazný přínos — kde delší trasa s návratem
+   stihne cennější tiles, opakování zůstane (a zobrazí se v panelu). Míra vyhýbání
+   je laditelná konstantou `REPEAT_PENALTY_PER_KM`.
 4. **Výstup**: délka, waypoint tiles, všechny protnuté tiles (počítané z plné
    geometrie hran — trasy v mapě i GPX kopírují skutečné tvary ulic), rozpad
    přínosu (zobrazuje se v panelu), počet porovnaných variant, GPX.
@@ -177,8 +183,6 @@ Naměřeno (Praha, okolí Karlova náměstí, graf 141 810 uzlů): plánování 
 jednorázově načtení grafu z cache ~24 s a scoring ~9 s (obojí si server podrží v paměti).
 Interaktivní přeplánovávání při změně parametrů je tedy proveditelné.
 
-Známé omezení: okruh se nevyhýbá průchodu stejnou ulicí oběma směry na různých
-úsecích (slepé ocásky se ořezávají, viz bod 3).
 
 ## Výpravy s MHD
 
@@ -236,7 +240,7 @@ dopravu — to dává prioritu bodu „Dosažitelnost MHD" níže.
 ## Další kroky (návrh)
 
 1. **Asynchronní příprava nové oblasti** — `POST /api/route` v úplně nové oblasti blokuje na minuty (Overpass download) a hrozí timeout prohlížeče; převést na úlohu na pozadí s hlášením průběhu do UI.
-2. **Kvalita okruhu** — společný přínos množiny, ořez ocásků, geometrie hran i preference typů cest jsou hotové; zbývá: penalizace průchodu stejnou ulicí oběma směry na různých úsecích okruhu, případně konfigurovatelné faktory preferencí v `config.yaml` a jemnější rozlišení chodník vs. cesta v parku (vyžaduje tagy `footway`/`surface` navíc v osmnx `useful_tags_way` + nové stažení grafů). Náklady na dopravu odečítat **jednou za trasu**, nikdy per tile.
+2. **Kvalita okruhu** — společný přínos množiny, ořez ocásků, geometrie hran, preference typů cest i penalizace opakování ulic jsou hotové; zbývá případně: konfigurovatelné faktory preferencí a penalizace opakování v `config.yaml`, jemnější rozlišení chodník vs. cesta v parku (vyžaduje tagy `footway`/`surface` navíc v osmnx `useful_tags_way` + nové stažení grafů). Náklady na dopravu odečítat **jednou za trasu**, nikdy per tile.
 3. **Výpravy s MHD — další iterace** — v1 hotová (viz výše); zbývá: nesymetrický návrat (jiná zastávka / jiné spojení zpět), běh z bodu do bodu (MHD tam, doběh domů nebo na jinou zastávku), reálné intervaly linek místo paušálního čekání (GTFS frequencies), přesnost pěších přesunů (teď vzdušná čára × 1,3). Náklady na dopravu zůstávají route-level, nikdy ve skóre tile.
 4. **Výkon `/api/opportunities`** — `_measure_gain` přepočítává celý cluster/square pro každého kandidáta; s růstem dat zvážit inkrementální výpočet a persistentní cache (teď jen `lru_cache` do restartu).
 5. **Testy** — v repu zatím žádné; pytest pro `cluster`, `square`, `scoring`, `routing` (čisté funkce), `statshunters` (sync klient má přepsatelnou `STATSHUNTERS_BASE_URL`, takže jde testovat proti lokálnímu falešnému serveru).
