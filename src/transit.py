@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 GTFS_ZIP = ROOT / "data" / "pid_gtfs.zip"
 GRAPH_CACHE = ROOT / "data" / "transit_graph.json"
 GTFS_URL = "https://data.pid.cz/PID_GTFS.zip"
-GRAPH_VERSION = 2
+GRAPH_VERSION = 3
 
 # GTFS route_type -> nas druh dopravy
 MODES = {0: "tram", 1: "metro", 2: "train", 3: "bus"}
@@ -33,6 +33,9 @@ MODE_WAIT_MIN = {"metro": 2.0, "tram": 4.0, "train": 8.0, "bus": 6.0, "other": 6
 WAIT_MIN_CLAMP = (1.0, 20.0)  # cekani = interval/2, orezane do tohoto rozsahu
 TRANSFER_PENALTY_MIN = 30.0  # velka vaha = nejdriv minimalizuj prestupy
 TRANSFER_WALK_MAX_M = 250.0
+# stejnojmenne zastavky (nastupiste, nadrazi) na sebe prestupuji do teto
+# vzdalenosti - PID ma stejna jmena obci/zastavek i desitky km od sebe!
+NAME_TRANSFER_MAX_M = 600.0
 
 EARTH_RADIUS_M = 6371000.0
 
@@ -61,6 +64,14 @@ def download_gtfs(url=GTFS_URL):
 def _read_csv(zip_file, name):
     with zip_file.open(name) as raw:
         yield from csv.DictReader(io.TextIOWrapper(raw, encoding="utf-8-sig"))
+
+
+def _is_technical_stop(stop_id):
+    """PID znaci technicke kolejove body (kilometrovniky, hranice kraju,
+    'Pha hl.n. Lc...') prefixem T + cislo; bezne zastavky maji prefix U.
+    Technicke body maji souradnice na trati misto nastupist - vlaky se pres ne
+    kontrahuji, aby nevznikaly falesne zastavky."""
+    return len(stop_id) > 1 and stop_id[0] == "T" and stop_id[1].isdigit()
 
 
 def _median_headway(departures):
@@ -110,7 +121,7 @@ def build_transit_graph(gtfs_zip=GTFS_ZIP):
     for row in _read_csv(zip_file, "stop_times.txt"):
         trip_id = row["trip_id"]
         key = trip_key.get(trip_id)
-        if key is None:
+        if key is None or _is_technical_stop(row["stop_id"]):
             continue
 
         sequence = int(row["stop_sequence"])
@@ -195,7 +206,13 @@ class TransitNetwork:
             cell.setdefault((round(lat / 0.003), round(lon / 0.005)), []).append(stop_id)
         for group in by_name.values():
             for a in group:
-                self.transfers[a].update(b for b in group if b != a)
+                _, lat_a, lon_a = self.stops[a]
+                for b in group:
+                    if b == a:
+                        continue
+                    _, lat_b, lon_b = self.stops[b]
+                    if _haversine_m(lat_a, lon_a, lat_b, lon_b) <= NAME_TRANSFER_MAX_M:
+                        self.transfers[a].add(b)
         for (cy, cx), members in cell.items():
             nearby = []
             for dy in (-1, 0, 1):
@@ -283,25 +300,32 @@ class TransitNetwork:
     def _compress_legs(self, path):
         legs = []
         for line, mode, stop_from, stop_to, ride_min, wait in path:
+            to_lat, to_lon = self.stops[stop_to][1:3]
             if legs and legs[-1]["line"] == line:
                 legs[-1]["to"] = self.stops[stop_to][0]
                 legs[-1]["to_id"] = stop_to
-                legs[-1]["to_lat"], legs[-1]["to_lon"] = self.stops[stop_to][1:3]
+                legs[-1]["to_lat"], legs[-1]["to_lon"] = to_lat, to_lon
                 legs[-1]["stops"] += 1
                 legs[-1]["minutes"] = round(legs[-1]["minutes"] + ride_min, 1)
+                legs[-1]["coords"].append([to_lat, to_lon])
             else:
                 legs.append({
                     "line": line,
                     "mode": mode,
+                    "wait_min": round(wait, 1),
                     "from": self.stops[stop_from][0],
                     "from_id": stop_from,
                     "from_lat": self.stops[stop_from][1],
                     "from_lon": self.stops[stop_from][2],
                     "to": self.stops[stop_to][0],
                     "to_id": stop_to,
-                    "to_lat": self.stops[stop_to][1],
-                    "to_lon": self.stops[stop_to][2],
+                    "to_lat": to_lat,
+                    "to_lon": to_lon,
                     "stops": 1,
                     "minutes": round(ride_min + wait, 1),
+                    "coords": [
+                        [self.stops[stop_from][1], self.stops[stop_from][2]],
+                        [to_lat, to_lon],
+                    ],
                 })
         return legs

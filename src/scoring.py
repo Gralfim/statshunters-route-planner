@@ -7,17 +7,24 @@ from square import find_largest_square
 
 STALENESS_CAP_DAYS = 3 * 365
 
+# Vahy: pomer 4:2:1 uvnitr obdobi (square : cluster : nenavstiveny) a 16x mezi
+# obdobimi - vyrazny odstup celkove > letosni > 3mesicni dle preference
+# uzivatele (2026-07-19), aby napr. rust rocniho clusteru prevazil 3mesicni
+# square. Vahy se nasobi velikosti zisku (square plochou side^2 - baseline^2).
+# Minimalni vaha 2 drzi staleness bonus (<= 1) pod rozlisovaci schopnosti priorit.
 PRIORITIES = [
-    ("all_square", "Zvetsi celkovy max square", "all", "square"),
-    ("all_cluster", "Zvetsi celkovy max cluster", "all", "cluster"),
-    ("all_unvisited", "Celkove nenavstiveny tile", "all", "unvisited"),
-    ("year_square", "Zvetsi letosni max square", "year", "square"),
-    ("year_cluster", "Zvetsi letosni max cluster", "year", "cluster"),
-    ("year_unvisited", "Letos nenavstiveny tile", "year", "unvisited"),
-    ("recent_square", "Zvetsi 3mesicni max square", "recent", "square"),
-    ("recent_cluster", "Zvetsi 3mesicni max cluster", "recent", "cluster"),
-    ("recent_unvisited", "Za posledni 3 mesice nenavstiveny tile", "recent", "unvisited"),
+    ("all_square", "Zvetsi celkovy max square", "all", "square", 2048),
+    ("all_cluster", "Zvetsi celkovy max cluster", "all", "cluster", 1024),
+    ("all_unvisited", "Celkove nenavstiveny tile", "all", "unvisited", 512),
+    ("year_square", "Zvetsi letosni max square", "year", "square", 128),
+    ("year_cluster", "Zvetsi letosni max cluster", "year", "cluster", 64),
+    ("year_unvisited", "Letos nenavstiveny tile", "year", "unvisited", 32),
+    ("recent_square", "Zvetsi 3mesicni max square", "recent", "square", 8),
+    ("recent_cluster", "Zvetsi 3mesicni max cluster", "recent", "cluster", 4),
+    ("recent_unvisited", "Za posledni 3 mesice nenavstiveny tile", "recent", "unvisited", 2),
 ]
+
+PRIORITY_WEIGHTS = {key: weight for key, _label, _period, _kind, weight in PRIORITIES}
 
 
 def _tile_set(tile_db):
@@ -124,7 +131,7 @@ def evaluate_tile_set(tiles, context):
     total = 0.0
     gains = {}
 
-    for index, (key, _label, period, kind) in enumerate(PRIORITIES):
+    for key, _label, period, kind, weight in PRIORITIES:
         existing = context["period_tiles"][period]
         baseline = context["baselines"][period]
 
@@ -146,7 +153,7 @@ def evaluate_tile_set(tiles, context):
                     contribution = new_side ** 2 - baseline["square_size"] ** 2
 
         gains[key] = gain
-        total += 2 ** (len(PRIORITIES) - index) * contribution
+        total += weight * contribution
 
     staleness = 0.0
     for tile in tiles:
@@ -183,7 +190,7 @@ def find_tile_opportunities(period_tile_dbs, today=None):
         score = 0
         visited_periods, missing_periods = _visit_status(tile, period_tiles)
 
-        for index, (key, label, period, kind) in enumerate(PRIORITIES):
+        for index, (key, label, period, kind, weight) in enumerate(PRIORITIES):
             baseline = baselines[period]
             hit = False
 
@@ -196,7 +203,7 @@ def find_tile_opportunities(period_tile_dbs, today=None):
 
             if hit:
                 priority = index + 1
-                score += 2 ** (len(PRIORITIES) - index)
+                score += weight
                 reasons.append({
                     "key": key,
                     "label": label,

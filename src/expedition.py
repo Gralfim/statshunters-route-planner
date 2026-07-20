@@ -22,12 +22,13 @@ from scoring import evaluate_tile_set
 
 WALK_DETOUR = 1.3               # jen pro levne odhady pri screeningu
 HOME_WALK_REACH_KM = 3.0
-HOME_STOP_RADIUS_M = 1500
+HOME_STOP_RADIUS_M = 2000  # dobeh na nadrazi je soucasti behu, muze byt stedry
 HOME_STOP_LIMIT = 12
 TARGET_STOP_LIMIT = 15
 RETURN_STOP_LIMIT = 8
 RETURN_COST_SLACK = 15.0        # navrat smi byt o tolik "drazsi", kdyz umozni prechod oblasti
-MAX_TARGETS = 20
+MAX_TARGETS = 20                # strop CASOVE SPLNITELNYCH kandidatu
+MAX_TARGET_CHECKS = 40          # strop dotazu na spojeni (nesplnitelne cile sloty nespotrebuji)
 TRANSIT_SPEED_KMH = 40          # hruby horni odhad rychlosti MHD vc. cekani (pro predfiltr)
 MAX_EXACT_TRANSIT_PLANS = 3
 MIN_LOOP_KM = 3.0
@@ -206,7 +207,9 @@ def _transit_candidates(start_lat, start_lon, target_km, tolerance_km, budget_mi
 
     candidates = []
     seen_stops = set()
-    for target in eligible[:MAX_TARGETS]:
+    for target in eligible[:MAX_TARGET_CHECKS]:
+        if len(candidates) >= MAX_TARGETS:
+            break
         # zastavka musi byt tak blizko cile, aby ho beh obsahl
         stop_radius = (target_km + tolerance_km) * 1000 / 2 * 0.8
         stops = network.stops_near(target["lat"], target["lon"], stop_radius)[:TARGET_STOP_LIMIT]
@@ -268,10 +271,10 @@ def _plan_pure_loop(start_lat, start_lon, target_km, tolerance_km, budget_min, p
     }
 
 
-def _choose_return(network, candidate, origin_ids, day):
-    """Zpatecni spojeni: mezi zastavkami u cile vyber tu s dobrym spojenim domu,
-    ktera je co nejdal od vystupni zastavky - beh pak cilovou oblast prejde,
-    misto aby se vracel na stejne misto."""
+def _return_options(network, candidate, origin_ids, day):
+    """Zpatecni spojeni: prednostne zastavka s dobrym spojenim domu co nejdal
+    od vystupu (beh cilovou oblast prejde), zaloznì nejlevnejsi navrat - pri
+    tesnem rozpoctu se vzdalenejsi navrat nemusi vejit do casoveho okna."""
     target = candidate["target"]
     stops = network.stops_near(target["lat"], target["lon"], candidate["stop_radius"])[:RETURN_STOP_LIMIT]
 
@@ -281,7 +284,7 @@ def _choose_return(network, candidate, origin_ids, day):
         if connection:
             options.append((stop_id, connection))
     if not options:
-        return None
+        return []
 
     best_cost = min(connection["cost"] for _, connection in options)
     viable = [
@@ -289,17 +292,26 @@ def _choose_return(network, candidate, origin_ids, day):
         if connection["cost"] <= best_cost + RETURN_COST_SLACK
     ]
     alight = candidate["alight"]
-    stop_id, connection = max(
+    farthest = max(
         viable,
         key=lambda item: haversine_m(
             alight["lat"], alight["lon"], network.stops[item[0]][1], network.stops[item[0]][2]
         ),
     )
-    stop = network.stops[stop_id]
-    return {
-        "stop": {"id": stop_id, "name": stop[0], "lat": stop[1], "lon": stop[2]},
-        "connection": connection,
-    }
+    cheapest = min(options, key=lambda item: item[1]["cost"])
+    ordered = [farthest] + ([cheapest] if cheapest[0] != farthest[0] else [])
+    return [
+        {
+            "stop": {
+                "id": stop_id,
+                "name": network.stops[stop_id][0],
+                "lat": network.stops[stop_id][1],
+                "lon": network.stops[stop_id][2],
+            },
+            "connection": connection,
+        }
+        for stop_id, connection in ordered
+    ]
 
 
 def _plan_transit_expedition(candidate, start_lat, start_lon, pace, budget_min,
@@ -311,19 +323,23 @@ def _plan_transit_expedition(candidate, start_lat, start_lon, pace, budget_min,
     home_graph = load_walk_graph(start_lat, start_lon, HOME_WALK_REACH_KM)
     walk_out = plan_walk(home_graph, start_lat, start_lon, board["lat"], board["lon"])
 
-    returning = _choose_return(network, candidate, origin_ids, day)
-    if returning is None:
+    options = _return_options(network, candidate, origin_ids, day)
+    if not options:
         raise RuntimeError("No return connection from the target area")
-    return_stop = returning["stop"]
-    conn_back = returning["connection"]
-    home_exit = network.stops[conn_back["stop_id"]]
-    walk_back = plan_walk(home_graph, home_exit[1], home_exit[2], start_lat, start_lon)
 
-    walks_km = walk_out["km"] + walk_back["km"]
-    transit_total = conn_out["minutes"] + conn_back["minutes"]
-    window = _loop_window(
-        candidate["target_km"], candidate["tolerance_km"], walks_km, budget_min, transit_total, pace
-    )
+    window = None
+    for returning in options:
+        return_stop = returning["stop"]
+        conn_back = returning["connection"]
+        home_exit = network.stops[conn_back["stop_id"]]
+        walk_back = plan_walk(home_graph, home_exit[1], home_exit[2], start_lat, start_lon)
+        walks_km = walk_out["km"] + walk_back["km"]
+        transit_total = conn_out["minutes"] + conn_back["minutes"]
+        window = _loop_window(
+            candidate["target_km"], candidate["tolerance_km"], walks_km, budget_min, transit_total, pace
+        )
+        if window is not None:
+            break
     if window is None:
         raise RuntimeError("Expedition does not fit the time budget")
     run_target, run_tolerance = window

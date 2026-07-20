@@ -305,14 +305,16 @@ def _square_completion_seeds(within, context, start, end, max_m):
     tiles maji samy o sobe nulovy square prinos (nesctitavost), takze by je
     obecne vyhledavani nemelo duvod kombinovat - proto dostavaji vlastni seed.
     Chybejici tile nemusi byt kandidat ze scoringu (score 0)."""
+    from scoring import PRIORITY_WEIGHTS
+
     by_tile = {cand["tile"]: cand for cand in within}
     seeds = []
     seen = set()
 
-    for period_index, period in enumerate(("all", "year", "recent")):
+    for period in ("all", "year", "recent"):
         tiles = context["period_tiles"][period]
         side = context["baselines"][period]["square_size"] + 1
-        weight = 2 ** (9 - period_index * 3)
+        weight = PRIORITY_WEIGHTS[f"{period}_square"]
 
         anchors = set()
         for cand in within:

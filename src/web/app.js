@@ -332,52 +332,106 @@ planButton.addEventListener('click', planRoute);
 
 const MODE_LABELS = { metro: 'metro', tram: 'tram', train: 'vlak', bus: 'bus', other: 'MHD' };
 
+function stopMarker(lat, lon, label, fillColor, radius) {
+  return L.circleMarker([lat, lon], {
+    pane: 'routePane', radius: radius || 5, color: '#111827',
+    weight: 1.5, fillColor: fillColor || '#ffffff', fillOpacity: 1
+  }).bindTooltip(label);
+}
+
+function connector(a, b) {
+  // tenka spojka mezi segmenty (prestup, dochod k zastavce), jen kdyz je mezera
+  const from = L.latLng(a);
+  const to = L.latLng(b);
+  if (from.distanceTo(to) < 15) return null;
+  return L.polyline([a, b], {
+    pane: 'routePane', color: '#53606f', weight: 1.5, dashArray: '1 5', opacity: 0.8
+  });
+}
+
 function drawExpedition(expedition) {
   routeLayerGroup.clearLayers();
   const bounds = [];
+  let previousEnd = null;
 
-  for (const segment of expedition.segments) {
-    if (segment.type === 'walk' && segment.coordinates && segment.coordinates.length > 1) {
-      routeLayerGroup.addLayer(L.polyline(segment.coordinates, {
-        pane: 'routePane', color: '#53606f', weight: 2.5, dashArray: '2 6', opacity: 0.9
-      }));
-      bounds.push(...segment.coordinates);
-    }
-    if (segment.type === 'transit') {
-      for (const leg of segment.legs) {
-        const line = [[leg.from_lat, leg.from_lon], [leg.to_lat, leg.to_lon]];
-        routeLayerGroup.addLayer(L.polyline(line, {
-          pane: 'routePane', color: '#53606f', weight: 3, dashArray: '8 8', opacity: 0.85
-        }));
-        bounds.push(...line);
-      }
+  function join(point) {
+    if (previousEnd) {
+      const link = connector(previousEnd, point);
+      if (link) routeLayerGroup.addLayer(link);
     }
   }
 
   const run = expedition.route.coordinates;
-  routeLayerGroup.addLayer(L.polyline(run, {
-    pane: 'routePane', color: '#ffffff', weight: 7, opacity: 0.9
-  }));
-  routeLayerGroup.addLayer(L.polyline(run, {
-    pane: 'routePane', color: '#111827', weight: 3.5, opacity: 0.95
-  }));
-  bounds.push(...run);
+  for (const segment of expedition.segments) {
+    if (segment.type === 'walk' && segment.coordinates && segment.coordinates.length > 1) {
+      join(segment.coordinates[0]);
+      routeLayerGroup.addLayer(L.polyline(segment.coordinates, {
+        pane: 'routePane', color: '#53606f', weight: 2.5, dashArray: '2 6', opacity: 0.9
+      }));
+      bounds.push(...segment.coordinates);
+      previousEnd = segment.coordinates[segment.coordinates.length - 1];
+    } else if (segment.type === 'transit') {
+      for (const leg of segment.legs) {
+        const line = leg.coords || [[leg.from_lat, leg.from_lon], [leg.to_lat, leg.to_lon]];
+        join(line[0]);
+        routeLayerGroup.addLayer(L.polyline(line, {
+          pane: 'routePane', color: '#53606f', weight: 3, dashArray: '8 8', opacity: 0.85
+        }));
+        routeLayerGroup.addLayer(stopMarker(leg.from_lat, leg.from_lon, `${leg.from} (${leg.line})`));
+        routeLayerGroup.addLayer(stopMarker(leg.to_lat, leg.to_lon, `${leg.to} (${leg.line})`));
+        bounds.push(...line);
+        previousEnd = line[line.length - 1];
+      }
+    } else if (segment.type === 'run') {
+      join(run[0]);
+      routeLayerGroup.addLayer(L.polyline(run, {
+        pane: 'routePane', color: '#ffffff', weight: 7, opacity: 0.9
+      }));
+      routeLayerGroup.addLayer(L.polyline(run, {
+        pane: 'routePane', color: '#111827', weight: 3.5, opacity: 0.95
+      }));
+      if (expedition.route.is_loop) {
+        routeLayerGroup.addLayer(stopMarker(run[0][0], run[0][1], 'Start i cil behu', '#008300', 7));
+      } else {
+        routeLayerGroup.addLayer(stopMarker(run[0][0], run[0][1], 'Start behu', '#008300', 7));
+        routeLayerGroup.addLayer(stopMarker(run[run.length - 1][0], run[run.length - 1][1], 'Konec behu', '#e34948', 7));
+      }
+      bounds.push(...run);
+      previousEnd = run[run.length - 1];
+    }
+  }
+
+  if (!expedition.segments.some(segment => segment.type === 'run')) {
+    routeLayerGroup.addLayer(L.polyline(run, {
+      pane: 'routePane', color: '#111827', weight: 3.5, opacity: 0.95
+    }));
+    bounds.push(...run);
+  }
   map.fitBounds(L.latLngBounds(bounds), { padding: [40, 40] });
 }
 
 function renderSegments(expedition) {
-  const lines = expedition.segments.map(segment => {
+  // podrobny itinerar: kazda jizda vlastni radek, prestupy explicitne
+  const lines = [];
+  for (const segment of expedition.segments) {
     if (segment.type === 'walk') {
-      return `Beh na prestup: ${segment.km} km (${segment.min} min)`;
+      lines.push(`${segment.desc}: ${segment.km} km (${segment.min} min)`);
+    } else if (segment.type === 'transit') {
+      segment.legs.forEach((leg, index) => {
+        if (index > 0) {
+          const previous = segment.legs[index - 1];
+          const where = previous.to === leg.from ? leg.from : `${previous.to} -> ${leg.from}`;
+          lines.push(`Prestup: ${where}`);
+        }
+        const wait = leg.wait_min ? `, cekani ~${leg.wait_min} min` : '';
+        lines.push(`${MODE_LABELS[leg.mode] || leg.mode} ${leg.line}: ${leg.from} -> ${leg.to} (${leg.stops} zast., ${leg.minutes} min${wait})`);
+      });
+    } else {
+      const from = expedition.alight ? ` z ${expedition.alight.name}` : '';
+      const to = expedition.return_stop ? ` do ${expedition.return_stop.name}` : '';
+      lines.push(`Beh${from}${to}: ${segment.km} km (${segment.min} min)`);
     }
-    if (segment.type === 'transit') {
-      const legs = segment.legs
-        .map(leg => `${MODE_LABELS[leg.mode] || leg.mode} ${leg.line} (${leg.stops} zast.)`)
-        .join(' -> ');
-      return `MHD ${segment.desc}: ${legs}, ${segment.min} min`;
-    }
-    return `Beh: ${segment.km} km (${segment.min} min)`;
-  });
+  }
 
   const alternatives = (expedition.alternatives || [])
     .slice(0, 4)

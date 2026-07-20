@@ -118,7 +118,7 @@ Všechny odpovědi se počítají při prvním dotazu a drží v `lru_cache` —
 Kandidáti = hraniční tiles všech období + tiles nenavštívené letos / v posledních 3 měsících.
 Skóre tile má dvě složky:
 
-1. **Priority** — 9 pravidel (zvětšení square / clusteru / nenavštívenost × období celkem → letos → 3 měsíce), každé splněné přidá váhu `2^k`. Vyšší priorita vždy přebije všechny nižší dohromady.
+1. **Priority** — 9 pravidel (zvětšení square / clusteru / nenavštívenost × období celkem → letos → 3 měsíce) s explicitními váhami: poměr **4 : 2 : 1 uvnitř období** (square : cluster : nenavštívený) a **16× odstup mezi obdobími** (celkem 2048/1024/512, letos 128/64/32, 3 měsíce 8/4/2) — výrazná převaha delších období, např. růst ročního clusteru přebije růst 3měsíčního square.
 2. **Stáří poslední návštěvy** — spojitý bonus 0–1: nikdy nenavštívený tile = 1,0; jinak `dny od poslední návštěvy / 1095` (strop 3 roky). Bonus je menší než minimální rozestup mezi kombinacemi priorit (2), takže jen doladí pořadí mezi tiles se stejnými prioritami — „kde jsem dlouho nebyl" vyhrává.
 
 **Zásada (důležité pro budoucí plánování tras):** skóre tile je *čistý přínos* jeho návštěvy — nikdy nesmí obsahovat náklady na cestu (MHD, vzdálenost od domova). Optimalizace trasy bude maximalizovat součet přínosů tiles na trase; kdyby byla cena dopravy ve skóre, započítala by se tolikrát, kolika tiles trasa projde. Náklady na dopravu patří až na úroveň trasy, jednou za trasu.
@@ -161,7 +161,7 @@ Jak to funguje:
    skutečným metrům) a ohodnotí **společným přínosem všech protnutých tiles**
    (`scoring.evaluate_tile_set`): Δsquare a Δcluster se počítají s celou množinou
    najednou (zisky nejsou aditivní), plus počty nových tiles podle období a
-   staleness bonusy. Váhy: priorita 2^k × velikost zisku, přičemž **square se váží
+   staleness bonusy. Váhy: priorita (viz tabulka výše) × velikost zisku, přičemž **square se váží
    plochou** (side² − baseline²) — bez toho by snadný růst clusteru o pár tiles
    vždy přebil vzácný růst square a obrátil pořadí priorit. Vítěz se ještě zkouší
    vylepšit přidáváním nevyužitých kandidátů (2 kola). Při přetečení tolerance
@@ -190,13 +190,17 @@ oblast přejde z bodu do bodu, místo aby se vracel. Tlačítko **Naplanovat vyp
 v panelu; čistý okruh bez MHD je vždy jednou z porovnávaných variant.
 
 1. **Síť MHD** z veřejného GTFS feedu PID (`data/pid_gtfs.zip`, ~44 MB, stáhne se
-   automaticky; kompaktní graf ~2 MB se cachuje v `data/transit_graph.json`). Časy jízdy
+   automaticky; kompaktní graf ~2 MB se cachuje v `data/transit_graph.json`). Technické
+   kolejové body feedu (prefix `T…` — kilometrovníky, „Pha hl.n. Lc…" se souřadnicemi
+   mimo nádraží) se kontrahují. Časy jízdy
    z jízdních řádů (reprezentativní spoj každé linky a směru); čekání = **polovina
    intervalu linky** pro daný typ dne (všední den / víkend, medián rozestupů odjezdů
    z GTFS calendar, ořez 1–20 min), kde interval není znám, paušál podle druhu dopravy.
    Typ dne se v UI přepíná („Vikendove intervaly MHD", výchozí podle dnešního data).
 2. **Router spojení** minimalizuje primárně počet přestupů (penalizace 30 min), sekundárně
    čas vážený prioritou druhů: metro ×1,0 > tram ×1,15 > vlak ×1,25 > ostatní ×1,5.
+   Přestupy mezi stejnojmennými zastávkami platí jen do 600 m — PID má stejná jména
+   obcí/zastávek i desítky kilometrů od sebe (rekord: 4× „Osek", 116 km).
 3. **Cílové oblasti**: lokální skupiny sousedících kandidátů (velké souvislé fronty se
    dělí mřížkou) **plus okna na dokompletování max square** (globální scan přes
    integrální obraz — chybějící tiles okna bývají rozptýlené a skupinové cíle by je
@@ -209,7 +213,10 @@ v panelu; čistý okruh bez MHD je vždy jednou z porovnávaných variant.
    dobré spojení domů (cena ≤ nejlepší + 15 ekviv. min) a co nejdál od výstupu, aby běh
    oblast přešel; pěší přesuny domov ↔ zastávka se počítají exaktně po grafu (kreslí se
    tečkovaně). Vítěz podle skutečného přínosu běhu. Odpověď obsahuje segmenty s časy,
-   spojení (linky, přestupy) a alternativní směry.
+   spojení (linky, přestupy) a alternativní směry. V mapě: MHD čárkovaně po
+   jednotlivých zastávkách (s markery a tooltipy), start běhu zeleně / konec červeně,
+   mezery mezi segmenty spojené tečkovaně; v panelu podrobný itinerář (každá jízda
+   zvlášť: linka, odkud → kam, počet zastávek, čas, čekání, přestupní zastávky).
 
 ## Stav vývoje (2026-07-18)
 
