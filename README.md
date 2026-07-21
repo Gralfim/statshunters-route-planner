@@ -210,13 +210,22 @@ v panelu; čistý okruh bez MHD je vždy jednou z porovnávaných variant.
 1. **Síť MHD** z veřejného GTFS feedu PID (`data/pid_gtfs.zip`, ~44 MB, stáhne se
    automaticky; kompaktní graf ~2 MB se cachuje v `data/transit_graph.json`). Technické
    kolejové body feedu (prefix `T…` — kilometrovníky, „Pha hl.n. Lc…" se souřadnicemi
-   mimo nádraží) se kontrahují. Časy jízdy
+   mimo nádraží) se kontrahují a **noční linky** (příznak `is_night`) se vynechávají
+   úplně — běhy se plánují přes den. Časy jízdy
    z jízdních řádů (reprezentativní spoj každé linky a směru); čekání = **polovina
    intervalu linky** pro daný typ dne (všední den / víkend, medián rozestupů odjezdů
-   z GTFS calendar, ořez 1–20 min), kde interval není znám, paušál podle druhu dopravy.
+   z GTFS calendar, ořez 1–20 min). Kromě intervalu se ukládá i **počet spojů**:
+   linka, která v daný typ dne nejede, se přeskočí úplně; linka s jediným spojem
+   denně dostane strop čekání (dřív spadla na paušál podle druhu dopravy a router
+   ji nabízel, jako by jezdila každých 12 minut).
    Typ dne se v UI přepíná („Vikendove intervaly MHD", výchozí podle dnešního data).
 2. **Router spojení** minimalizuje primárně počet přestupů (penalizace 30 min), sekundárně
    čas vážený prioritou druhů: metro ×1,0 > tram ×1,15 > vlak ×1,25 > ostatní ×1,5.
+   Do ceny se započítá i **doběh z domova na nástupní a z výstupní zastávky domů**
+   (v minutách běhu, ne do času jízdy), takže vyhraje zastávka výhodná pro celou
+   výpravu — bližší zastávka porazí vzdálenější se stejně rychlým spojením.
+   Vystupuje se vždy tam, kam skutečně dojela linka (dřív mohl router na konci
+   „přestoupit" pěšky jinam a běh pak začínal na jiné zastávce, než kde jízda končila).
    Přestupy mezi stejnojmennými zastávkami platí jen do 600 m — PID má stejná jména
    obcí/zastávek i desítky kilometrů od sebe (rekord: 4× „Osek", 116 km).
 3. **Cílové oblasti**: lokální skupiny sousedících kandidátů (velké souvislé fronty se

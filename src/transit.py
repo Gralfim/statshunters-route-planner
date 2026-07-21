@@ -9,6 +9,7 @@ calendar); kde interval neni znamy, pouzije se pausal podle druhu dopravy.
 import csv
 import heapq
 import io
+import itertools
 import json
 import math
 import statistics
@@ -17,11 +18,13 @@ import zipfile
 from collections import defaultdict
 from pathlib import Path
 
+_GOAL = object()  # virtualni cilovy uzel (viz TransitNetwork.route)
+
 ROOT = Path(__file__).resolve().parents[1]
 GTFS_ZIP = ROOT / "data" / "pid_gtfs.zip"
 GRAPH_CACHE = ROOT / "data" / "transit_graph.json"
 GTFS_URL = "https://data.pid.cz/PID_GTFS.zip"
-GRAPH_VERSION = 3
+GRAPH_VERSION = 4
 
 # GTFS route_type -> nas druh dopravy
 MODES = {0: "tram", 1: "metro", 2: "train", 3: "bus"}
@@ -31,6 +34,10 @@ MODE_MULTIPLIER = {"metro": 1.0, "tram": 1.15, "train": 1.25, "bus": 1.5, "other
 # pausalni cekani pri nastupu/prestupu (minuty) - fallback bez znameho intervalu
 MODE_WAIT_MIN = {"metro": 2.0, "tram": 4.0, "train": 8.0, "bus": 6.0, "other": 6.0}
 WAIT_MIN_CLAMP = (1.0, 20.0)  # cekani = interval/2, orezane do tohoto rozsahu
+# Linka s jedinym spojem za den zadny interval nema - cekani na ni je fakticky
+# neomezene, dostava proto strop (bez toho spadla na pausal podle druhu dopravy
+# a router ji nabizel, jako by jezdila kazdych 12 minut).
+SPARSE_LINE_WAIT_MIN = WAIT_MIN_CLAMP[1]
 TRANSFER_PENALTY_MIN = 30.0  # velka vaha = nejdriv minimalizuj prestupy
 TRANSFER_WALK_MAX_M = 250.0
 # stejnojmenne zastavky (nastupiste, nadrazi) na sebe prestupuji do teto
@@ -93,6 +100,10 @@ def build_transit_graph(gtfs_zip=GTFS_ZIP):
 
     routes = {}
     for row in _read_csv(zip_file, "routes.txt"):
+        # Nocni linky (is_night) se pro planovani behu nehodi - jezdi v noci a
+        # casto jen par spoju za noc.
+        if row.get("is_night") == "1":
+            continue
         route_type = int(row.get("route_type") or 3)
         routes[row["route_id"]] = {
             "name": row.get("route_short_name") or row["route_id"],
@@ -147,12 +158,17 @@ def build_transit_graph(gtfs_zip=GTFS_ZIP):
         if days[1]:
             weekend_deps.append(dep_min)
 
+    # Krome intervalu se uklada i pocet spoju: nula znamena "v tento typ dne
+    # nejede" (linku je treba pri hledani preskocit), jednicka "interval nelze
+    # spocitat" (dostane strop cekani).
     headways = {}
     for key, (weekday_deps, weekend_deps) in departures.items():
-        weekday = _median_headway(weekday_deps)
-        weekend = _median_headway(weekend_deps)
-        if weekday or weekend:
-            headways["|".join(key)] = [weekday, weekend]
+        headways["|".join(key)] = [
+            _median_headway(weekday_deps),
+            _median_headway(weekend_deps),
+            len(weekday_deps),
+            len(weekend_deps),
+        ]
 
     used_stops = set()
     edges = []
@@ -235,45 +251,79 @@ class TransitNetwork:
                 found.append((distance, stop_id))
         return sorted(found)
 
+    def line_runs(self, line_key, day="weekday"):
+        """Jezdi linka v dany typ dne? (neznama linka se nefiltruje)"""
+        entry = self.headways.get(line_key)
+        if not entry or len(entry) < 4:
+            return True
+        return bool(entry[2 if day == "weekday" else 3])
+
     def wait_min(self, line_key, mode, day="weekday"):
         """Ocekavane cekani = polovina intervalu linky pro dany typ dne."""
-        headway = self.headways.get(line_key)
-        value = headway[0 if day == "weekday" else 1] if headway else None
-        if value is None:
+        entry = self.headways.get(line_key)
+        if not entry:
             return MODE_WAIT_MIN.get(mode, 6.0)
+
+        value = entry[0 if day == "weekday" else 1]
+        if value is None:
+            # jediny spoj za den - interval neexistuje
+            return SPARSE_LINE_WAIT_MIN
         low, high = WAIT_MIN_CLAMP
         return min(max(value / 2, low), high)
 
-    def route(self, origin_stops, target_stops, day="weekday"):
+    def route(self, origin_stops, target_stops, day="weekday",
+              origin_costs=None, target_costs=None):
         """Nejlepsi spojeni z mnoziny zastavek do mnoziny zastavek.
 
         Cena = prestupy * TRANSFER_PENALTY_MIN + jizda * MODE_MULTIPLIER + cekani
-        (interval/2 dle typu dne). Stav dijkstry je (zastavka, linka), aby sly
-        prestupy pocitat presne. Vraci {minutes, cost, transfers, legs} nebo None.
+        (interval/2 dle typu dne). origin_costs/target_costs pridavaji cenu
+        dobehu na nastupni a z vystupni zastavky (v minutach behu), takze se
+        vybere zastavka vyhodna z pohledu CELE vypravy, ne jen jizdy samotne;
+        do casu jizdy (`minutes`) se nepocitaji - ty si vyprava vede zvlast.
+
+        Stav dijkstry je (zastavka, linka, prijel-jsem-sem), aby sly prestupy
+        pocitat presne a aby se z cile vystupovalo tam, kam skutecne dojela
+        linka (ne po pesim prestupu jinam). Vraci {minutes, cost, transfers,
+        legs, stop_id} nebo None.
         """
         targets = set(target_stops)
+        origin_costs = origin_costs or {}
+        target_costs = target_costs or {}
+
+        counter = itertools.count()  # stabilni poradi, heap nikdy neporovnava data
         heap = []
         for stop in origin_stops:
-            heapq.heappush(heap, (0.0, 0.0, 0, stop, None, ()))
+            heapq.heappush(heap, (origin_costs.get(stop, 0.0), next(counter),
+                                  0.0, 0, stop, None, (), None))
         best = {}
 
         while heap:
-            cost, minutes, transfers, stop, line, path = heapq.heappop(heap)
-            state = (stop, line)
-            if state in best and best[state] <= cost:
-                continue
-            best[state] = cost
+            cost, _, minutes, transfers, stop, line, path, arrived = heapq.heappop(heap)
 
-            if stop in targets:
+            if stop is _GOAL:
+                legs = self._compress_legs(path)
                 return {
                     "minutes": round(minutes, 1),
                     "cost": round(cost, 1),
                     "transfers": transfers,
-                    "legs": self._compress_legs(path),
-                    "stop_id": stop,
+                    "legs": legs,
+                    "stop_id": legs[-1]["to_id"] if legs else arrived,
                 }
 
+            state = (stop, line, arrived == stop)
+            if state in best and best[state] <= cost:
+                continue
+            best[state] = cost
+
+            # Vystup do cile jen tam, kam me dovezla linka (nebo z vychozi
+            # zastavky) - jinak by itinerar koncil jinde, nez zacina beh.
+            if stop in targets and arrived in (None, stop):
+                heapq.heappush(heap, (cost + target_costs.get(stop, 0.0), next(counter),
+                                      minutes, transfers, _GOAL, line, path, stop))
+
             for next_stop, ride_min, next_line, mode, line_key in self.adjacency[stop]:
+                if not self.line_runs(line_key, day):
+                    continue
                 boarding = line != next_line
                 extra_transfers = 1 if boarding and line is not None else 0
                 extra_cost = ride_min * MODE_MULTIPLIER.get(mode, 1.6)
@@ -285,15 +335,18 @@ class TransitNetwork:
                     extra_minutes += wait
                 heapq.heappush(heap, (
                     cost + extra_cost,
+                    next(counter),
                     minutes + extra_minutes,
                     transfers + extra_transfers,
                     next_stop,
                     next_line,
                     path + ((next_line, mode, stop, next_stop, ride_min, wait),),
+                    next_stop,
                 ))
 
             for other in self.transfers[stop]:
-                heapq.heappush(heap, (cost, minutes, transfers, other, line, path))
+                heapq.heappush(heap, (cost, next(counter), minutes, transfers,
+                                      other, line, path, arrived))
 
         return None
 

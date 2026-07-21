@@ -189,6 +189,17 @@ def _loop_window(target_km, tolerance_km, walks_km, budget_min, transit_total_mi
     return (max(loop_min, MIN_LOOP_KM) + loop_max) / 2, (loop_max - max(loop_min, MIN_LOOP_KM)) / 2
 
 
+def _home_walk_costs(network, start_lat, start_lon, stop_ids, pace):
+    """Cena dobehu mezi domovem a zastavkou v minutach behu - router pak vybira
+    zastavku vyhodnou pro celou vypravu (blizsi zastavka porazi vzdalenejsi se
+    stejne rychlym spojenim)."""
+    costs = {}
+    for stop_id in stop_ids:
+        _name, lat, lon = network.stops[stop_id]
+        costs[stop_id] = haversine_m(start_lat, start_lon, lat, lon) * WALK_DETOUR / 1000 * pace
+    return costs
+
+
 def _transit_candidates(start_lat, start_lon, target_km, tolerance_km, budget_min, pace,
                         network, targets, origin_ids, day):
     # predfiltr dosazitelnosti: cile, ke kterym se pri nejkratsim pripustnem behu
@@ -216,7 +227,10 @@ def _transit_candidates(start_lat, start_lon, target_km, tolerance_km, budget_mi
         if not stops:
             continue
 
-        connection = network.route(origin_ids, [stop_id for _, stop_id in stops], day=day)
+        connection = network.route(
+            origin_ids, [stop_id for _, stop_id in stops], day=day,
+            origin_costs=_home_walk_costs(network, start_lat, start_lon, origin_ids, pace),
+        )
         if not connection or not connection["legs"]:
             continue
         if connection["stop_id"] in seen_stops:
@@ -271,7 +285,7 @@ def _plan_pure_loop(start_lat, start_lon, target_km, tolerance_km, budget_min, p
     }
 
 
-def _return_options(network, candidate, origin_ids, day):
+def _return_options(network, candidate, origin_ids, day, home_costs):
     """Zpatecni spojeni: prednostne zastavka s dobrym spojenim domu co nejdal
     od vystupu (beh cilovou oblast prejde), zaloznì nejlevnejsi navrat - pri
     tesnem rozpoctu se vzdalenejsi navrat nemusi vejit do casoveho okna."""
@@ -280,7 +294,7 @@ def _return_options(network, candidate, origin_ids, day):
 
     options = []
     for _, stop_id in stops:
-        connection = network.route([stop_id], origin_ids, day=day)
+        connection = network.route([stop_id], origin_ids, day=day, target_costs=home_costs)
         if connection:
             options.append((stop_id, connection))
     if not options:
@@ -323,7 +337,10 @@ def _plan_transit_expedition(candidate, start_lat, start_lon, pace, budget_min,
     home_graph = load_walk_graph(start_lat, start_lon, HOME_WALK_REACH_KM)
     walk_out = plan_walk(home_graph, start_lat, start_lon, board["lat"], board["lon"])
 
-    options = _return_options(network, candidate, origin_ids, day)
+    options = _return_options(
+        network, candidate, origin_ids, day,
+        _home_walk_costs(network, start_lat, start_lon, origin_ids, pace),
+    )
     if not options:
         raise RuntimeError("No return connection from the target area")
 
