@@ -20,7 +20,25 @@ IMPROVE_MOVES_PER_ROUND = 10
 # opakovani rozhoduje mezi jinak srovnatelnymi trasami a nikdy neobetuje vyrazny
 # prinos - v souladu se zasadou "prinos king".
 REUSE_PENALTY = 4.0
-REPEAT_PENALTY_PER_KM = 2.0
+# Penalizace je PODILOVA (opakovane metry / delka trasy), aby netlacila na
+# zkracovani trasy - absolutni km/trasu delaly z nejkratsiho okruhu vzdy vitezze.
+# Skore = prinos x (1 - REPEAT_PENALTY_FRACTION x podil opakovani).
+REPEAT_PENALTY_FRACTION = 0.5
+# Kolik nejlepsich variant se navic prepocita s vyhybanim opakovanym ulicim
+# (nizkoopakovaci varianty maji byt v portfoliu, ne az finalizaci vitezze).
+AVOID_VARIANTS = 3
+AVOID_MIN_RATIO = 0.03  # pod timto podilem opakovani se avoid varianta nepocita
+# Kolik tiles navic smi trasa pobrat, aby se dostala na spodni hranici tolerance
+# (waypointy mirici na okraj tile zkracuji trasu - delku je pak treba dotahnout).
+MAX_FILL_ROUNDS = 5
+# Waypoint se umistuje dovnitr tile, ne do jeho stredu - ale s rezervou od
+# hranice, aby tile zustal navstiveny i pri chybe GPS nebo navigace pri behu.
+TILE_MARGIN_M = 75.0
+# Efektivni "polomer" tile pro odhady delky: trasa miri na okraj bezpecne zony,
+# ne do stredu (tile ma v nasich sirkach ~1570 m, pulka 785 m minus rezerva).
+# Bez teto korekce odhady nadhodnocovaly delku 1,5-4x a greedy prestal pridavat
+# tiles drive, nez trasa dosahla spodni hranice tolerance.
+TILE_EFFECTIVE_RADIUS_M = 700.0
 
 
 def haversine_m(lat1, lon1, lat2, lon2):
@@ -160,6 +178,54 @@ def nearest_node(node_index, lat, lon):
     coslat = math.cos(math.radians(lat))
     d2 = (lats - lat) ** 2 + ((lons - lon) * coslat) ** 2
     return nodes[int(np.argmin(d2))]
+
+
+_TILE_NODES_CACHE = {}
+
+
+def _tile_interior_nodes(graph, node_index, tile):
+    """Uzly lezici uvnitr tile s rezervou TILE_MARGIN_M od hranice.
+
+    Rezerva je pojistka proti chybe GPS/navigace: trasa jen tecna k hranici by
+    tile pri par metrech odchylky nemusela zapocitat. Kdyz v bezpecne zone zadna
+    cesta neni, ustupuje se na cely tile a nakonec na stred (fallbacky)."""
+    import numpy as np
+
+    key = (id(graph), tile)
+    if key not in _TILE_NODES_CACHE:
+        nodes, lats, lons = node_index
+        x, y = tile
+        west, north = tile_lon_lat(x, y)
+        east, south = tile_lon_lat(x + 1, y + 1)
+        dlat = TILE_MARGIN_M / 111320.0
+        dlon = TILE_MARGIN_M / (111320.0 * math.cos(math.radians((north + south) / 2)))
+
+        inside = (lats >= south) & (lats <= north) & (lons >= west) & (lons <= east)
+        safe = inside & (
+            (lats >= south + dlat) & (lats <= north - dlat)
+            & (lons >= west + dlon) & (lons <= east - dlon)
+        )
+        index = np.flatnonzero(safe)
+        if not len(index):
+            index = np.flatnonzero(inside)
+        _TILE_NODES_CACHE[key] = ([nodes[i] for i in index], lats[index], lons[index])
+    return _TILE_NODES_CACHE[key]
+
+
+def _pick_waypoint_node(graph, node_index, tile, previous, following):
+    """Uzel v tile, ktery nejmene zajizdi: minimalizuje vzdalenost od
+    predchoziho bodu trasy k nemu a dal k nasledujicimu cili. Trasa se tak tile
+    dotkne tam, kudy stejne vede, misto zajizdky do geometrickeho stredu."""
+    import numpy as np
+
+    nodes, lats, lons = _tile_interior_nodes(graph, node_index, tile)
+    if not len(nodes):
+        return nearest_node(node_index, *tile_center(tile))
+
+    coslat = math.cos(math.radians(previous[0]))
+    to_previous = np.hypot(lats - previous[0], (lons - previous[1]) * coslat)
+    to_following = np.hypot(lats - following[0], (lons - following[1]) * coslat)
+    return nodes[int(np.argmin(to_previous + to_following))]
 
 
 def _best_edge(graph, u, v):
@@ -303,10 +369,16 @@ def _exact_loop(graph, cache, start_node, waypoint_nodes, end_node=None, avoid_r
 
 
 def _estimate_path_m(start, end, seq):
-    points = [start] + [(item["lat"], item["lon"]) for item in seq] + [end]
-    straight = sum(
-        haversine_m(*points[i], *points[i + 1]) for i in range(len(points) - 1)
-    )
+    """Odhad delky trasy. Waypointy maji polomer (trasa se tile dotkne u okraje),
+    start a cil jsou body - jinak odhad systematicky nadhodnocuje."""
+    points = [(start, 0.0)]
+    points += [((item["lat"], item["lon"]), TILE_EFFECTIVE_RADIUS_M) for item in seq]
+    points.append((end, 0.0))
+
+    straight = 0.0
+    for (point, radius), (next_point, next_radius) in zip(points, points[1:]):
+        gap = haversine_m(*point, *next_point) - radius - next_radius
+        straight += max(gap, 0.0)
     return DETOUR_FACTOR * straight
 
 
@@ -422,6 +494,59 @@ def _greedy_fill(start, end, sequence, pool, max_m):
     return sequence
 
 
+def _filler_candidates(start, end, max_m, used_tiles):
+    """Tiles v dosahu bez ohledu na prinos - slouzi jen k dotazeni delky trasy,
+    kdyz doporucene tiles nestaci na spodni hranici tolerance."""
+    center_x, center_y = lon_lat_tile(start[1], start[0])
+    span = int(max_m / 2 / 1200) + 2
+    fillers = []
+    for dx in range(-span, span + 1):
+        for dy in range(-span, span + 1):
+            tile = (center_x + dx, center_y + dy)
+            if tile in used_tiles:
+                continue
+            lat, lon = tile_center(tile)
+            if _reachable(lat, lon, start, end, max_m):
+                fillers.append({"tile": tile, "score": 0.0, "lat": lat, "lon": lon})
+    return fillers
+
+
+def _extend_to_window(details_for, start, end, best, min_m, max_m):
+    """Prodluzuje trasu pres dalsi tiles v dosahu, dokud nedosahne okna delky.
+    Vybira vzdy ten tile, se kterym odhad delky nejlepe trefi stred okna."""
+    target_m = (min_m + max_m) / 2
+    sequence = list(best["sequence"])
+    fillers = _filler_candidates(start, end, max_m, {item["tile"] for item in sequence})
+    current = best
+
+    for _ in range(MAX_FILL_ROUNDS):
+        if len(sequence) >= MAX_WAYPOINTS or not fillers:
+            break
+
+        choice = None
+        for filler in fillers:
+            for position in range(len(sequence) + 1):
+                trial = sequence[:position] + [filler] + sequence[position:]
+                estimate = _estimate_path_m(start, end, trial)
+                if estimate <= max_m:
+                    distance = abs(estimate - target_m)
+                    if choice is None or distance < choice[0]:
+                        choice = (distance, trial, filler)
+        if choice is None:
+            break
+
+        fillers.remove(choice[2])
+        details = details_for(choice[1])
+        if not details or details["length_m"] <= current["length_m"]:
+            continue
+
+        current, sequence = details, choice[1]
+        if current["in_window"]:
+            break
+
+    return current
+
+
 def _route_details(graph, leg_cache, node_index, start_node, sequence, min_m, max_m, context,
                    end_node=None, avoid_reuse=False):
     """Exaktni trasa pro sekvenci waypointu + spolecny prinos protnutych tiles.
@@ -430,8 +555,25 @@ def _route_details(graph, leg_cache, node_index, start_node, sequence, min_m, ma
     from scoring import evaluate_tile_set
 
     sequence = list(sequence)
+    start_point = (graph.nodes[start_node]["y"], graph.nodes[start_node]["x"])
+    finish = start_point if end_node is None else (
+        graph.nodes[end_node]["y"], graph.nodes[end_node]["x"]
+    )
+
     while True:
-        waypoint_nodes = [nearest_node(node_index, item["lat"], item["lon"]) for item in sequence]
+        # Waypoint = uzel uvnitr tile nejmene zajizdejici z predchoziho bodu
+        # k nasledujicimu cili (nasledujici tile zatim zastupuje jeho stred).
+        waypoint_nodes = []
+        previous = start_point
+        for position, item in enumerate(sequence):
+            following = (
+                (sequence[position + 1]["lat"], sequence[position + 1]["lon"])
+                if position + 1 < len(sequence) else finish
+            )
+            node = _pick_waypoint_node(graph, node_index, item["tile"], previous, following)
+            waypoint_nodes.append(node)
+            previous = (graph.nodes[node]["y"], graph.nodes[node]["x"])
+
         length_m, node_path = _exact_loop(
             graph, leg_cache, start_node, waypoint_nodes, end_node, avoid_reuse
         )
@@ -462,8 +604,14 @@ def _route_details(graph, leg_cache, node_index, start_node, sequence, min_m, ma
 
 
 def _variant_score(details):
-    """Cilova funkce trasy: prinos snizeny o mekkou penalizaci opakovanych ulic."""
-    return details["benefit"]["total"] - REPEAT_PENALTY_PER_KM * details["repeated_m"] / 1000
+    """Cilova funkce trasy: prinos snizeny o PODIL opakovanych ulic.
+
+    Podil (ne absolutni km) proto, aby penalizace netrestala delku trasy:
+    s absolutni penalizaci byl vzdy nejvyhodnejsi nejkratsi pripustny okruh.
+    Nasobeni prinosem drzi meritko - u velkych i malych prinosu stejny vztah."""
+    length_m = details["length_m"]
+    ratio = details["repeated_m"] / length_m if length_m > 0 else 0.0
+    return details["benefit"]["total"] * (1 - REPEAT_PENALTY_FRACTION * min(ratio, 1.0))
 
 
 def _variant_key(details):
@@ -492,9 +640,10 @@ def plan_tile_loop(graph, start_lat, start_lon, target_km, tolerance_km, candida
     end_node = None if is_loop else nearest_node(node_index, end[0], end[1])
     leg_cache = {}
 
-    def details_for(sequence):
+    def details_for(sequence, avoid_reuse=False):
         return _route_details(
-            graph, leg_cache, node_index, start_node, sequence, min_m, max_m, context, end_node
+            graph, leg_cache, node_index, start_node, sequence, min_m, max_m, context, end_node,
+            avoid_reuse=avoid_reuse,
         )
 
     variants = []
@@ -527,6 +676,19 @@ def plan_tile_loop(graph, start_lat, start_lon, target_km, tolerance_km, candida
         if details:
             variants.append(details)
 
+    # Nizkoopakovaci varianty patri do portfolia, ne az do finalizace vitezze:
+    # nejlepsi seedy se prepocitaji i s vyhybanim opakovanym ulicim a souteri
+    # rovnocenne. (Jinak vyhraje trasa, ktera prinos nasbirala prave opakovanim,
+    # a jeji "opravena" verze uz se neprosadi.)
+    for details in sorted(variants, key=_variant_key, reverse=True)[:AVOID_VARIANTS]:
+        # Vyhybani je drahe (hledani bez cache) - ma smysl jen tam, kde je co
+        # zlepsovat; varianty s minimalnim opakovanim se preskakuji.
+        if details["repeated_m"] <= AVOID_MIN_RATIO * details["length_m"]:
+            continue
+        refined = details_for(details["sequence"], avoid_reuse=True)
+        if refined:
+            variants.append(refined)
+
     if not variants:
         raise RuntimeError("No walkable route found from the start point")
 
@@ -549,14 +711,14 @@ def plan_tile_loop(graph, start_lat, start_lon, target_km, tolerance_km, candida
         if not improved:
             break
 
-    # Finalni prepocet vitezne trasy s aktivnim vyhybanim opakovanym ulicim.
-    # Prijmi, kdyz zustane v okne a zlepsi cilovou funkci (mensi opakovani smi
-    # vyvazit jen maly pokles prinosu - viz _variant_score).
+    # Kratsi trasa nez zadane okno: dotahni delku pres dalsi tiles v dosahu.
+    if not best["in_window"] and best["length_m"] < min_m:
+        best = _extend_to_window(details_for, start, end, best, min_m, max_m)
+
+    # Finalni prepocet vitezne trasy s vyhybanim - pokryva vitezze, ktery vzesel
+    # az z kola vylepsovani (varianty z portfolia uz svou avoid verzi maji).
     if best["sequence"] and best["repeated_m"] > 0:
-        refined = _route_details(
-            graph, leg_cache, node_index, start_node, best["sequence"],
-            min_m, max_m, context, end_node, avoid_reuse=True,
-        )
+        refined = details_for(best["sequence"], avoid_reuse=True)
         if refined and _variant_key(refined) > _variant_key(best):
             best = refined
 

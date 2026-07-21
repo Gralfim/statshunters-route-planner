@@ -165,23 +165,32 @@ Jak to funguje:
    plochou** (side² − baseline²) — bez toho by snadný růst clusteru o pár tiles
    vždy přebil vzácný růst square a obrátil pořadí priorit. Vítěz se ještě zkouší
    vylepšit přidáváním nevyužitých kandidátů (2 kola). Při přetečení tolerance
-   odpadá nejslabší waypoint.
-3. **Ořez ocásků**: slepé úseky tam-a-zpět (dijkstra vede trasu až k uzlu u středu
-   tile, ale tile se počítá už prvním vstupem) se zkracují na nejmenší délku, která
+   odpadá nejslabší waypoint; naopak pokud trasa nedosáhne spodní hranice, dotáhne
+   se přes další tiles v dosahu (`_extend_to_window`).
+3. **Kudy tile protnout**: waypoint není střed dlaždice, ale uzel uvnitř ní, který
+   nejméně zajíždí z předchozího bodu k dalšímu cíli — trasa se tak dlaždice dotkne
+   tam, kudy stejně vede. Kvůli chybě GPS/navigace se drží **rezerva 75 m od hranice**
+   (`TILE_MARGIN_M`), takže trasa vede prokazatelně dovnitř; naměřená hloubka průniku
+   na reálných trasách je 220–540 m. Odhady délky s tím počítají (waypoint má
+   efektivní poloměr ~700 m) — bez té korekce nadhodnocovaly délku 1,5–4× a trasy
+   vycházely zbytečně krátké.
+4. **Ořez ocásků**: slepé úseky tam-a-zpět se zkracují na nejmenší délku, která
    zachová množinu protnutých tiles — přínos se nemění, hluchá vzdálenost mizí.
    Navíc se **penalizuje průchod stejnou ulicí**: hrana už použitá na trase se při
-   plánování dalšího úseku zdraží, takže se okruh vrací jinudy. Opakování je měkká
-   složka cílové funkce (skóre = přínos − 2 × opakované km): rozhoduje mezi jinak
-   srovnatelnými trasami, ale neobětuje výrazný přínos — kde delší trasa s návratem
-   stihne cennější tiles, opakování zůstane (a zobrazí se v panelu). Míra vyhýbání
-   je laditelná konstantou `REPEAT_PENALTY_PER_KM`.
-4. **Výstup**: délka, waypoint tiles, všechny protnuté tiles (počítané z plné
+   plánování dalšího úseku zdraží, takže se okruh vrací jinudy. Nízkoopakovací
+   varianty se počítají rovnou v portfoliu (top 3 seedy, `AVOID_VARIANTS`), ne až
+   jako oprava vítěze. Opakování je měkká složka cílové funkce: skóre = přínos ×
+   (1 − 0,5 × **podíl** opakovaných metrů). Podíl, ne absolutní kilometry — s
+   absolutní penalizací vycházel vždy nejlevněji nejkratší přípustný okruh.
+   Míra vyhýbání je laditelná konstantou `REPEAT_PENALTY_FRACTION`.
+5. **Výstup**: délka, waypoint tiles, všechny protnuté tiles (počítané z plné
    geometrie hran — trasy v mapě i GPX kopírují skutečné tvary ulic), rozpad
    přínosu (zobrazuje se v panelu), počet porovnaných variant, GPX.
 
-Naměřeno (Praha, okolí Karlova náměstí, graf 141 810 uzlů): plánování okruhu **0,3–0,4 s**;
-jednorázově načtení grafu z cache ~24 s a scoring ~9 s (obojí si server podrží v paměti).
-Interaktivní přeplánovávání při změně parametrů je tedy proveditelné.
+Naměřeno (Praha, okolí Karlova náměstí, graf 141 810 uzlů): plánování okruhu
+**0,1–10 s** podle délky a počtu variant (15±3 km ≈ 10 s, kratší okruhy pod 1 s);
+jednorázově načtení grafu z cache ~24 s a scoring ~9 s (obojí si server podrží
+v paměti).
 
 
 ## Výpravy s MHD
@@ -230,6 +239,7 @@ v panelu; čistý okruh bez MHD je vždy jednou z porovnávaných variant.
 - plánování okruhů (`src/routing.py` + `POST /api/route` + UI v mapě) — špendlík startu, délka/tolerance v panelu, vykreslení trasy, GPX ke stažení; po warm-upu přeplánování 0,3–1,7 s,
 - **optimalizace společného přínosu**: trasa se vybírá porovnáním variant podle skutečného zisku statistik celé množiny protnutých tiles; square vážený plochou + seedy na dokompletování square (ověřený postup zlepšení z Karlova nám.: greedy 18,6 → portfolio 36,9 → square-aware 96,6, trasa 4×4 → 5×5 přes Košíře); rozpad přínosu se zobrazuje v panelu,
 - **kvalita tras**: preference typů cest pro běh (cyklostezka > turistická cesta > park/pěší zóna > chodník > klidná ulice; rušné silnice penalizované) — ověřeno: trasa Karlovo nám. → Podolí přešla z 77 % preferovaných / 21 % silnic na **98 % preferovaných / 1 % silnic** při stejné délce; trasy a GPX nově kopírují skutečné geometrie ulic (896 bodů místo ~370 uzlů),
+- **kvalita okruhů (07/2026)**: waypointy míří dovnitř dlaždice místo do jejího středu (rezerva 75 m proti chybě GPS), penalizace opakování je podílová a nízkoopakovací varianty soutěží rovnou v portfoliu. Na výchozím okruhu z Karlova nám.: opakování **24 % → 3 %**, zamotaná Trója zmizela (**40 % → 0 %** bodů trasy v oblasti) a přínos vzrostl **90 → 209**. Kalibrace odhadů délky (waypoint má efektivní poloměr) navíc odstranila systematicky krátké trasy — všech 7 testovaných scénářů je nyní v toleranci (dřív 2 mimo),
 - **výpravy s MHD** (`src/transit.py` + `src/expedition.py` + `POST /api/expedition` + tlačítko v UI) — ověřeno E2E: z Karlova nám. při 15±3 km / 120 min vyhrála výprava metro A + bus 350 do Roztok (benefit 1371 vs. 96,6 čistého okruhu, 3 nové tiles, 117,7 min); při 12±3 km / 150 min vlak T7 do Dobřichovic (0 přestupů) s dokompletováním **celkového square 15×15 → 16×16** (benefit 17 138, 148,4 min) — shoduje se s intuicí uživatele (Černošice/Solopisky), která na 120 min opravdu nevychází.
 
 **Empirické zjištění (07/2026):** v doběhovém dosahu z Karlova náměstí (~8 km) je už všechno
