@@ -12,10 +12,7 @@ for (const [name, zIndex] of Object.entries(PANES)) {
   map.createPane(`${name}Pane`).style.zIndex = zIndex;
 }
 
-const OPPORTUNITY_COLORS = {
-  unvisited: '#4a3aa7',
-  visited: '#1baf7a'
-};
+const OPPORTUNITY_COLOR = '#4a3aa7';
 
 const periodOrder = ['all', 'year', 'recent'];
 const overlayGroups = {
@@ -55,15 +52,21 @@ function tilePopup(p) {
 function opportunityStyle(feature) {
   const priority = feature.properties.priority;
   const visited = feature.properties.visited_periods || {};
-  const fillOpacity = Math.max(0.22, 0.7 - (priority - 1) * 0.06);
-  const fillColor = visited.all ? OPPORTUNITY_COLORS.visited : OPPORTUNITY_COLORS.unvisited;
+  const weight = priority <= 3 ? 1.5 : 0.8;
+  const opacity = priority <= 3 ? 0.85 : 0.45;
+
+  // Uz navstiveny tile nese barvu obdobi posledni navstevy - vypln doporuceni
+  // by ji jen prekryla a nic navic nerekne, zustava proto jen obrys.
+  if (visited.all) {
+    return { color: '#111827', weight, opacity, fill: false };
+  }
 
   return {
     color: '#111827',
-    weight: priority <= 3 ? 1.5 : 0.8,
-    fillColor,
-    fillOpacity,
-    opacity: priority <= 3 ? 0.85 : 0.45
+    weight,
+    fillColor: OPPORTUNITY_COLOR,
+    fillOpacity: Math.max(0.22, 0.7 - (priority - 1) * 0.06),
+    opacity
   };
 }
 
@@ -180,22 +183,36 @@ function renderStats() {
 function renderLegend() {
   document.querySelector('#legend').innerHTML = `
     <div>Barva tile = obdobi posledni navstevy</div>
-    <div><span class="swatch" style="background:${OPPORTUNITY_COLORS.unvisited}"></span> Doporuceni: nikdy nenavstiveno</div>
-    <div><span class="swatch" style="background:${OPPORTUNITY_COLORS.visited}"></span> Doporuceni: navrat po case</div>
+    <div><span class="swatch" style="background:${OPPORTUNITY_COLOR}"></span> Doporuceni: nikdy nenavstiveno</div>
   `;
 }
 
-async function drawCheckedOverlays() {
+async function drawCheckedOverlays(skip = []) {
   for (const overlay of Object.keys(overlayGroups)) {
+    if (skip.includes(overlay)) continue;
     const input = document.querySelector(`[data-overlay="${overlay}"]`);
     if (input.checked) await drawOverlay(overlay);
   }
 }
 
-async function fitToAllTiles(summary) {
-  const allTiles = await loadTilesLayer();
-  if (allTiles.getBounds().isValid()) {
-    map.fitBounds(allTiles.getBounds(), { padding: [24, 24] });
+// Uvodni pohled kryje okoli domova, ne vsechny tiles: zamorske aktivity
+// (dovolene) by jinak roztahly meritko na cely svet.
+const HOME_VIEW_RADIUS_M = 60000;
+
+async function fitToHomeArea(summary) {
+  const tilesLayer = await loadTilesLayer();
+  const home = L.latLng(summary.home.lat, summary.home.lon);
+  const bounds = L.latLngBounds([]);
+
+  tilesLayer.eachLayer(layer => {
+    const tileBounds = layer.getBounds();
+    if (home.distanceTo(tileBounds.getCenter()) <= HOME_VIEW_RADIUS_M) {
+      bounds.extend(tileBounds);
+    }
+  });
+
+  if (bounds.isValid()) {
+    map.fitBounds(bounds, { padding: [24, 24] });
   } else {
     map.setView([summary.home.lat, summary.home.lon], 11);
   }
@@ -212,8 +229,13 @@ async function loadSummary() {
   routeBudget.value = summary.expedition_budget_min;
   routePace.value = summary.run_pace_min_per_km;
   setStart(summary.home.lat, summary.home.lon);
-  await drawCheckedOverlays();
-  await fitToAllTiles(summary);
+
+  // Meritko se nastavi hned podle (rychle) vrstvy tiles; teprve pak se dokresluji
+  // pomalejsi vrstvy, aby uz mapa pod rukama neposkocila.
+  const tilesShown = document.querySelector('[data-overlay="tiles"]').checked;
+  if (tilesShown) await drawOverlay('tiles');
+  await fitToHomeArea(summary);
+  await drawCheckedOverlays(tilesShown ? ['tiles'] : []);
 }
 
 const routeDistance = document.querySelector('#route-distance');

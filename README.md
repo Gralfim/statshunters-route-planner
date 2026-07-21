@@ -31,7 +31,7 @@ Spouštět z kořene repozitáře. Frontend běží přímo na kořenové URL (`
 ### Prostředí
 
 - Python 3.13+ (vyvíjeno na 3.14), závislosti: `pip install -r requirements.txt`
-  (fastapi, uvicorn, pyyaml, shapely)
+  (fastapi, uvicorn, pyyaml, shapely, osmnx — s ním geopandas/numpy/pandas/networkx)
 - V repu není venv — balíčky jsou nainstalované v globálním Pythonu.
 
 ## Data
@@ -66,7 +66,9 @@ Share link se vytváří na statshunters.com → Settings → Share link. Místo
 i proměnnou prostředí `STATSHUNTERS_SHARE_LINK` (má přednost — hodí se, když kód nechcete
 mít v commitovaném `config.yaml`). `STATSHUNTERS_BASE_URL` přepíše adresu API (pro testy).
 
-Pozn.: `home` a délka trasy se zatím používají jen informativně v `/api/summary` — plánování tras je ještě neimplementované (viz Další kroky).
+Pozn.: hodnoty z configu jsou jen **výchozí** — start, délka, tolerance, tempo i časový
+rozpočet se zadávají za běhu v panelu mapy (a jako parametry `POST /api/route`
+resp. `/api/expedition`).
 
 ## Struktura projektu
 
@@ -81,7 +83,9 @@ Pozn.: `home` a délka trasy se zatím používají jen informativně v `/api/su
 | `src/square.py` | největší plně pokrytý čtverec (DP) |
 | `src/scoring.py` | bodování kandidátních tiles: 9 priorit (square/cluster/nenavštívený × 3 období) + bonus za stáří poslední návštěvy |
 | `src/statshunters.py` | klient StatsHunters share API — stránkované stahování aktivit do `data/` |
-| `src/routing.py` | plánování okruhů: pěší graf OSM (osmnx), greedy výběr tiles, GPX export |
+| `src/routing.py` | plánování běhů: pěší graf OSM (osmnx), výběr tiles, preference cest, penalizace opakování, GPX |
+| `src/transit.py` | síť MHD z PID GTFS + router spojení (min. přestupů, priorita druhů) |
+| `src/expedition.py` | výpravy: cílové oblasti, spojení tam/zpět, časový rozpočet |
 | `src/geojson.py` | převod tiles na GeoJSON polygony |
 | `src/web/` | Leaflet frontend (mapa, přepínání vrstev, statistiky, legenda, sync tlačítko) |
 
@@ -89,8 +93,9 @@ Pozn.: `home` a délka trasy se zatím používají jen informativně v `/api/su
 
 Každý navštívený tile se kreslí jednou, barvou podle **období poslední návštěvy** (studená → teplá):
 modrá `#2a78d6` = naposledy před letoškem, žlutá `#eda100` = letos (před více než 3 měsíci),
-červená `#e34948` = poslední 3 měsíce. Doporučené tiles: fialová `#4a3aa7` = nikdy nenavštívené,
-akvamarín `#1baf7a` = návrat po čase; obojí s tmavým obrysem. Paleta je ověřená validátorem
+červená `#e34948` = poslední 3 měsíce. Doporučené tiles: fialová výplň `#4a3aa7` u dosud
+nenavštívených; doporučení na už navštíveném tile má jen tmavý obrys bez výplně, aby
+nepřekrylo barvu jeho období (tu informaci nese sám tile). Paleta je ověřená validátorem
 na rozlišitelnost včetně barvosleposti (nejhorší pár období ΔE 15,3, cíl ≥ 8). Obrysy max
 clusteru (čárkovaně) a max square (plně) používají barvu svého období a jsou neklikatelné,
 aby nepřekrývaly popupy tiles a doporučení.

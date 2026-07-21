@@ -4,6 +4,7 @@ from pathlib import Path
 
 import yaml
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -102,6 +103,22 @@ def _tile_props(tile, rec):
         "first_visit": rec["first_visit"].date().isoformat(),
         "last_visit": rec["last_visit"].date().isoformat(),
     }
+
+
+# Dlazdice v barvach obdobi; prohlizec si /favicon.ico vyzada i pri deklarovanem
+# <link rel="icon">, takze se obsluhuje primo (jinak 404 v logu).
+FAVICON_SVG = (
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
+    "<rect width='16' height='16' fill='#2a78d6'/>"
+    "<rect x='8' width='8' height='8' fill='#eda100'/>"
+    "<rect y='8' width='8' height='8' fill='#e34948'/>"
+    "</svg>"
+)
+
+
+@app.get("/favicon.ico")
+def favicon():
+    return Response(content=FAVICON_SVG, media_type="image/svg+xml")
 
 
 @app.get("/api/health")
