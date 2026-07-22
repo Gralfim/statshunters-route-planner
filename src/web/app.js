@@ -251,6 +251,7 @@ const gpxButton = document.querySelector('#gpx');
 const routeStatus = document.querySelector('#route-status');
 const routeBenefit = document.querySelector('#route-benefit');
 const routeSegments = document.querySelector('#route-segments');
+const routeDirections = document.querySelector('#route-directions');
 
 const GAIN_LABELS = {
   all_square: 'square celkem',
@@ -263,6 +264,32 @@ const GAIN_LABELS = {
   recent_cluster: 'cluster 3 mes.',
   recent_unvisited: 'nove za 3 mes.'
 };
+
+// Tahak na trasu: useky s nazvy ulic/cest, delkou a smerem zatoceni.
+function renderDirections(route) {
+  const steps = (route && route.directions) || [];
+  if (!steps.length) {
+    routeDirections.hidden = true;
+    return;
+  }
+
+  const rows = steps.map(step => {
+    const turn = step.turn ? `<span class="turn">${step.turn}</span> ` : '';
+    const steps_note = step.steps ? ' po schodech' : '';
+    const bridge = step.bridge ? ' (most)' : '';
+    const heading = step.start_heading ? ` <span class="dist">smer ${step.start_heading}</span>` : '';
+    const at = `<span class="dist">${step.at_km.toFixed(1)} km</span>`;
+    const cross = (step.crossings && step.crossings.length)
+      ? `<div class="cross">${step.crossings.map(c => `${c.name} (${c.at_km.toFixed(1)} km)`).join(', ')}</div>`
+      : '';
+    return `<li>${at} ${turn}${step.label}${steps_note}${bridge}${heading}${cross}</li>`;
+  }).join('');
+
+  routeDirections.innerHTML =
+    `<details><summary>Itinerar behu (${steps.length} useku, ${route.length_km} km)</summary>`
+    + `<ul class="itinerary">${rows}</ul></details>`;
+  routeDirections.hidden = false;
+}
 
 function renderBenefit(route) {
   const parts = Object.entries(route.benefit.gains)
@@ -296,14 +323,57 @@ function setStart(lat, lon) {
 
 map.on('contextmenu', event => setStart(event.latlng.lat, event.latlng.lng));
 
+// Odecet vzdalenosti od startu behu: pri najeti na trasu ukaze, kolik km je
+// dany bod od zacatku (jako mapy.cz) - slouzi k presnemu popisu mist na trase.
+const probeMarker = L.circleMarker([0, 0], {
+  pane: 'routePane', radius: 6, color: '#111827', weight: 2,
+  fillColor: '#ffffff', fillOpacity: 1, interactive: false
+});
+
+function attachDistanceProbe(layer, coordinates) {
+  const cumulative = [0];
+  for (let i = 1; i < coordinates.length; i++) {
+    cumulative[i] = cumulative[i - 1]
+      + L.latLng(coordinates[i - 1]).distanceTo(coordinates[i]);
+  }
+  const total = cumulative[cumulative.length - 1] / 1000;
+
+  layer.bindTooltip('', { sticky: true, direction: 'top', opacity: 0.95 });
+  layer.on('mousemove', event => {
+    // levna aproximace vzdalenosti (staci pro nalezeni nejblizsiho bodu)
+    const { lat, lng } = event.latlng;
+    const coslat = Math.cos(lat * Math.PI / 180);
+    let best = 0;
+    let bestDistance = Infinity;
+    for (let i = 0; i < coordinates.length; i++) {
+      const dy = coordinates[i][0] - lat;
+      const dx = (coordinates[i][1] - lng) * coslat;
+      const distance = dy * dy + dx * dx;
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = i;
+      }
+    }
+    const km = cumulative[best] / 1000;
+    layer.setTooltipContent(
+      `${km.toFixed(2)} km od startu<br>(zbyva ${(total - km).toFixed(2)} km)`
+    );
+    probeMarker.setLatLng(coordinates[best]).addTo(map);
+  });
+  layer.on('mouseout', () => probeMarker.remove());
+}
+
 function drawRoute(route) {
   routeLayerGroup.clearLayers();
+  probeMarker.remove();
   routeLayerGroup.addLayer(L.polyline(route.coordinates, {
     pane: 'routePane', color: '#ffffff', weight: 7, opacity: 0.9
   }));
-  routeLayerGroup.addLayer(L.polyline(route.coordinates, {
+  const line = L.polyline(route.coordinates, {
     pane: 'routePane', color: '#111827', weight: 3.5, opacity: 0.95
-  }));
+  });
+  attachDistanceProbe(line, route.coordinates);
+  routeLayerGroup.addLayer(line);
   map.fitBounds(L.latLngBounds(route.coordinates), { padding: [40, 40] });
 }
 
@@ -316,6 +386,7 @@ async function planRoute() {
   gpxButton.hidden = true;
   routeBenefit.hidden = true;
   routeSegments.hidden = true;
+  routeDirections.hidden = true;
 
   try {
     const response = await fetch('/api/route', {
@@ -344,6 +415,7 @@ async function planRoute() {
       `Trasa ${route.length_km} km${target}, nejlepsi z ${route.variants_compared} variant; ` +
       `protne ${route.tiles_crossed.length} tiles (z toho ${route.crossed_recommended} doporucenych).`;
     renderBenefit(route);
+    renderDirections(route);
     gpxButton.hidden = false;
   } catch (error) {
     routeStatus.style.color = '#b91c1c';
@@ -377,6 +449,7 @@ function connector(a, b) {
 
 function drawExpedition(expedition) {
   routeLayerGroup.clearLayers();
+  probeMarker.remove();
   const bounds = [];
   let previousEnd = null;
 
@@ -413,9 +486,11 @@ function drawExpedition(expedition) {
       routeLayerGroup.addLayer(L.polyline(run, {
         pane: 'routePane', color: '#ffffff', weight: 7, opacity: 0.9
       }));
-      routeLayerGroup.addLayer(L.polyline(run, {
+      const runLine = L.polyline(run, {
         pane: 'routePane', color: '#111827', weight: 3.5, opacity: 0.95
-      }));
+      });
+      attachDistanceProbe(runLine, run);
+      routeLayerGroup.addLayer(runLine);
       if (expedition.route.is_loop) {
         routeLayerGroup.addLayer(stopMarker(run[0][0], run[0][1], 'Start i cil behu', '#008300', 7));
       } else {
@@ -480,6 +555,7 @@ async function planExpedition() {
   gpxButton.hidden = true;
   routeBenefit.hidden = true;
   routeSegments.hidden = true;
+  routeDirections.hidden = true;
 
   try {
     const response = await fetch('/api/expedition', {
@@ -509,6 +585,7 @@ async function planExpedition() {
     }
     routeStatus.textContent = `Nejlepsi vyprava: ${kind}.`;
     renderBenefit(expedition.route);
+    renderDirections(expedition.route);
     gpxButton.hidden = false;
   } catch (error) {
     routeStatus.style.color = '#b91c1c';

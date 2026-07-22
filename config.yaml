@@ -1,7 +1,7 @@
 home:
   name: Karlovo namesti
-  lat: 50.0757
-  lon: 14.4188
+  lat: 50.0745
+  lon: 14.4201
 target_distance_km: 15
 distance_tolerance_km: 3
 run_pace_min_per_km: 6.0

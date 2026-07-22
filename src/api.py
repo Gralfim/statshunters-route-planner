@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from cluster import find_largest_cluster
 from expedition import build_targets, plan_expedition
+from landmarks import annotate_directions
 from frontier import frontier_tiles
 from geojson import feature_collection, tile_feature, tile_outline_feature_collection
 from load import load_activities
@@ -244,6 +245,16 @@ def opportunities_geojson():
     )
 
 
+def _annotate_landmarks(route, lat, lon, reach_km):
+    """Doplni itinerar behu o krizeni vody/zeleznice. Stazeni bariér muze v nove
+    oblasti trvat, proto se selhani jen tise preskoci - itinerar zustane s
+    ulicemi."""
+    try:
+        annotate_directions(route["directions"], route["coordinates"], lat, lon, reach_km)
+    except Exception:
+        pass
+
+
 class RouteRequest(BaseModel):
     lat: float | None = None
     lon: float | None = None
@@ -278,6 +289,7 @@ def plan_route(request: RouteRequest):
 
     candidate_tiles = {tuple(item["tile"]) for item in opportunities}
     route["crossed_recommended"] = sum(1 for tile in route["tiles_crossed"] if tile in candidate_tiles)
+    _annotate_landmarks(route, lat, lon, reach_km)
     route["gpx"] = route_to_gpx(route["coordinates"])
     return route
 
@@ -325,7 +337,11 @@ def plan_expedition_endpoint(request: ExpeditionRequest):
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Planovani vypravy selhalo: {exc}")
 
-    plan["route"]["gpx"] = route_to_gpx(plan["route"]["coordinates"])
+    run = plan["route"]
+    center_lat = sum(c[0] for c in run["coordinates"]) / len(run["coordinates"])
+    center_lon = sum(c[1] for c in run["coordinates"]) / len(run["coordinates"])
+    _annotate_landmarks(run, center_lat, center_lon, run["length_km"] / 2 + 1)
+    run["gpx"] = route_to_gpx(run["coordinates"])
     return plan
 
 

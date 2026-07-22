@@ -5,7 +5,8 @@ from models import Activity, Tile
 
 def load_activities(data_dir):
     out=[]
-    for p in sorted(Path(data_dir).glob('*.json')):
+    # jen exporty aktivit - v data/ jsou i jine JSON (transit_graph, barriers)
+    for p in sorted(Path(data_dir).glob('activities*.json')):
         data=json.loads(p.read_text(encoding='utf-8'))
         for a in data.get('activities',[]):
             out.append(Activity(

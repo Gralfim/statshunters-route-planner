@@ -86,6 +86,7 @@ resp. `/api/expedition`).
 | `src/routing.py` | plánování běhů: pěší graf OSM (osmnx), výběr tiles, preference cest, penalizace opakování, GPX |
 | `src/transit.py` | síť MHD z PID GTFS + router spojení (min. přestupů, priorita druhů) |
 | `src/expedition.py` | výpravy: cílové oblasti, spojení tam/zpět, časový rozpočet |
+| `src/landmarks.py` | vodní toky a železnice (osmnx features) + geometrické křížení pro itinerář |
 | `src/geojson.py` | převod tiles na GeoJSON polygony |
 | `src/web/` | Leaflet frontend (mapa, přepínání vrstev, statistiky, legenda, sync tlačítko) |
 
@@ -188,9 +189,33 @@ Jak to funguje:
    (1 − 0,5 × **podíl** opakovaných metrů). Podíl, ne absolutní kilometry — s
    absolutní penalizací vycházel vždy nejlevněji nejkratší přípustný okruh.
    Míra vyhýbání je laditelná konstantou `REPEAT_PENALTY_FRACTION`.
-5. **Výstup**: délka, waypoint tiles, všechny protnuté tiles (počítané z plné
+5. **Itinerář běhu** (`route_directions` + `src/landmarks.py`) — tahák na trasu: úseky
+   se stejným popisem sloučené, s **kumulativní vzdáleností od startu** (akční bod:
+   „v 0,5 km vpravo Ke Karlovu"), směrem zatočení, „po schodech", označením mostů,
+   u prvního kroku světovou stranou a **orientačními body s km** (co a kde trasa kříží).
+   - **Názvy ulic**: pěší graf z osmnx vede chodníky jako **nepojmenované** cesty a osy
+     ulic z velké části vynechává (Ke Karlovu 0 hran, Ječná 2). Pojmenované ulice se
+     proto stahují **zvlášť** (osmnx features, `data/streets_*.json`) a při přípravě
+     grafu se každému chodníku přiřadí ulice, podél níž vede (atribut `along_street`,
+     KD-strom, ~0,7 s). Pokrytí názvy stouplo z ~16 % na **~92 %** délky, generický
+     „chodník" zbyl minimálně. (Ověřeno proti ručnímu popisu z mapy: začátek trasy
+     „Ječná → vpravo Ke Karlovu → Wenzigova → Lublaňská → Bělehradská" sedí.)
+   - **Orientační body**: křížené významné ulice (tertiary+, kolmé ke směru) z ulic
+     nad rámec grafu; a **vodní toky + železnice** (v pěším grafu nejsou) — vodní toky
+     si nesou název (Botič, Vltava), tratě genericky „žel. trať". Křížení se hledá
+     geometricky (shapely) a řadí podle vzdálenosti; ulice, po níž právě běžíme nebo
+     hned poběžíme, se jako křížení neuvádí.
+   - Zdroje (ulice, bariéry) se cachují coverage cache jako graf; první stažení pro
+     Prahu je v řádu minut (geometrie Vltavy, 25 tis. ulic), pak 0,1 s. Krátké úseky
+     se slučují (bezejmenné pod 250 m, pojmenované pod 100 m). V panelu pod
+     rozbalovacím „Itinerar behu".
+   - **Odečet vzdálenosti v mapě**: najetím na trasu se ukáže, kolik km je daný bod
+     od startu běhu a kolik zbývá (jako v mapy.cz), s kroužkem na nejbližším bodě
+     trasy. Slouží k přesnému popisu míst („nepřesnost v 3,2 km"). Počítá se v
+     prohlížeči z bodů trasy — souhlasí s délkou i itinerářem na jednotky metrů.
+6. **Výstup**: délka, waypoint tiles, všechny protnuté tiles (počítané z plné
    geometrie hran — trasy v mapě i GPX kopírují skutečné tvary ulic), rozpad
-   přínosu (zobrazuje se v panelu), počet porovnaných variant, GPX.
+   přínosu, itinerář, počet porovnaných variant, GPX.
 
 Naměřeno (Praha, okolí Karlova náměstí, graf 141 810 uzlů): plánování okruhu
 **0,1–10 s** podle délky a počtu variant (15±3 km ≈ 10 s, kratší okruhy pod 1 s);

@@ -41,6 +41,14 @@ html,body,#map{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI
 #plan:disabled,#plan-expedition:disabled{background:#9aa2af;cursor:wait}
 #plan-expedition{background:#4a3aa7}
 #route-segments{font-size:12px;color:#1a202c;background:#f4f6f8;border-radius:6px;padding:8px;line-height:1.5}
+#route-directions{font-size:12px;color:#1a202c;background:#f4f6f8;border-radius:6px;padding:8px}
+#route-directions summary{cursor:pointer;font-weight:600}
+#route-directions .itinerary{margin:6px 0 0;padding:0;list-style:none}
+#route-directions .itinerary li{padding:3px 0;border-top:1px solid #e5e9ef;line-height:1.4}
+#route-directions .turn{font-weight:700}
+#route-directions .dist{display:inline-block;min-width:44px;color:#53606f;font-variant-numeric:tabular-nums}
+#route-directions .cross{margin-left:44px;color:#2a78d6;font-size:11px}
+#route-directions .cross::before{content:"krizi: "}
 #gpx{padding:7px;border:1px solid #111827;border-radius:6px;background:#fff;color:#111827;font-weight:600;cursor:pointer}
 #route-status,#route-start{font-size:12px;color:#53606f}
 .route-check{display:flex;align-items:center;gap:6px;font-size:12px;color:#53606f}
@@ -79,6 +87,7 @@ html,body,#map{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI
     <div id="route-status"></div>
     <div id="route-benefit" hidden></div>
     <div id="route-segments" hidden></div>
+    <div id="route-directions" hidden></div>
     <button id="gpx" hidden>Stahnout GPX</button>
   </div>
   <button id="sync">Aktualizovat data ze StatsHunters</button>
