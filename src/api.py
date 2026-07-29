@@ -261,12 +261,13 @@ def opportunities_geojson():
 
 def _annotate_landmarks(route, lat, lon, reach_km):
     """Doplni itinerar behu o krizeni vody/zeleznice. Stazeni bariér muze v nove
-    oblasti trvat, proto se selhani jen tise preskoci - itinerar zustane s
-    ulicemi."""
+    oblasti trvat i selhat; trasa je pouzitelna i bez nich, takze se chyba
+    nepropaguje do odpovedi - ale do logu patri, jinak by tise mizely
+    orientacni body a nebylo by poznat proc."""
     try:
         annotate_directions(route["directions"], route["coordinates"], lat, lon, reach_km)
     except Exception:
-        pass
+        traceback.print_exc()
 
 
 class RouteRequest(BaseModel):

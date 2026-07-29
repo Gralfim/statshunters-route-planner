@@ -85,6 +85,18 @@ RUN_PREFERENCES = {
 }
 DEFAULT_RUN_FACTOR = 1.1
 
+# Typ cesty sam o sobe nestaci: v pesim grafu je pres 80 % delky `footway`, takze
+# chodnik podel ctyrproude silnice vypada stejne dobre jako pesina v parku - a
+# protoze je levnejsi nez klidna ulice (0,85 vs. 1,0), trasy se na velke tahy
+# primo lepily (mereno na okruhu z Karlova nam.: 63 % delky podel ulic tridy
+# tertiary+). Chodnikum a cestam vedenym podel vyznamne ulice (atribut
+# along_major z enrich_streets) se proto preference odebira. Faktor cestu nikdy
+# nezlevni - jen zastropuje.
+ALONG_MAJOR_FACTOR = 1.25
+# Znacena turisticka trasa nebo cyklotrasa (atribut trail) byva vedena mimo
+# provoz a za behu se po ni lepe orientuje - proto bonus.
+TRAIL_BONUS = 0.85
+
 MIN_DOWNLOAD_REACH_KM = 10
 # Reach je horni odhad (vzdusnou carou max/2 + rezerva); kandidatni tiles lezi
 # nejvyse na 90 % teto vzdalenosti. Chybejici vnejsi lem grafu tedy trasu
@@ -114,13 +126,25 @@ def _covering_graph_path(lat, lon, reach_km):
     return best[0] if best else None
 
 
-def _edge_factor(highway):
+def _way_type_factor(highway):
     if isinstance(highway, (list, tuple)):
         return min(
             (RUN_PREFERENCES.get(value, DEFAULT_RUN_FACTOR) for value in highway),
             default=DEFAULT_RUN_FACTOR,
         )
     return RUN_PREFERENCES.get(highway, DEFAULT_RUN_FACTOR)
+
+
+def _edge_factor(edge):
+    """Preference typu cesty upravena o kontext, ve kterem cesta vede: podel
+    jake ulice (along_major) a jestli po ni jde znacena trasa (trail). Oboji
+    doplnuje enrich_streets, proto se ceny pocitaji az po nem."""
+    factor = _way_type_factor(edge.get("highway"))
+    if edge.get("along_major") and _tag(edge, "highway") in NAMEABLE_HIGHWAYS:
+        factor = max(factor, ALONG_MAJOR_FACTOR)
+    if edge.get("trail"):
+        factor *= TRAIL_BONUS
+    return factor
 
 
 # Typy cest, kterym se dohleda ulice, podel ktere vedou (chodniky/stezky bez
@@ -131,16 +155,19 @@ FOOTLIKE_HIGHWAYS = {"footway", "steps", "pedestrian"}
 
 
 def prepare_run_costs(graph):
-    """Doplni hranam run_cost = delka x preference typu cesty."""
+    """Doplni hranam run_cost = delka x preference cesty (vcetne kontextu)."""
     for _u, _v, data in graph.edges(data=True):
-        data["run_cost"] = float(data["length"]) * _edge_factor(data.get("highway"))
+        data["run_cost"] = float(data["length"]) * _edge_factor(data)
     return graph
 
 
-def _match_parallel(graph, edges_data, mids, owns, segments, max_m, attribute, candidates=6):
+def _match_parallel(graph, edges_data, mids, owns, segments, max_m, attribute,
+                    candidates=6, extra=None):
     """Priradi hranam nejblizsi soubeznou linii (ulici/znacenou trasu).
     candidates = kolik nejblizsich segmentu se zkusi; v mistech s vice trasami
-    pres sebe (cyklotrasy) jich par nestaci, nez se najde soubezny."""
+    pres sebe (cyklotrasy) jich par nestaci, nez se najde soubezny.
+    extra = (pole hodnot, jmeno atributu) - druhy udaj prevzaty od TEHOZ
+    nalezeneho segmentu (u ulic priznak, ze je vyznamna)."""
     import numpy as np
     from scipy.spatial import cKDTree
 
@@ -168,15 +195,18 @@ def _match_parallel(graph, edges_data, mids, owns, segments, max_m, attribute, c
             diff = min(diff, 180 - diff)
             if diff <= STREET_MATCH_MAX_DEG:
                 data[attribute] = str(slabels[idxs[i, j]])
+                if extra is not None:
+                    values, extra_attribute = extra
+                    data[extra_attribute] = bool(values[idxs[i, j]])
                 break
 
 
 def enrich_streets(graph, lat, lon, reach_km):
-    """Chodnikum/stezkam bez jmena priradi ulici, podel ktere vedou (atribut
-    along_street), vsem cestam znacenou trasu (atribut trail), a ulozi index
-    pojmenovanych ulic na graf. Osy ulic v pesim grafu casto chybi (Ke Karlovu
-    0 hran), znacene trasy jsou v OSM relace - oboji z externiho zdroje.
-    Bezi jednou per graf (graf se drzi v pameti)."""
+    """Chodnikum/stezkam bez jmena priradi ulici, podel ktere vedou (atributy
+    along_street a along_major), vsem cestam znacenou trasu (atribut trail), a
+    ulozi index pojmenovanych ulic na graf. Osy ulic v pesim grafu casto chybi
+    (Ke Karlovu 0 hran), znacene trasy jsou v OSM relace - oboji z externiho
+    zdroje. Bezi jednou per graf (graf se drzi v pameti)."""
     import landmarks
 
     segments = landmarks.street_segments(landmarks.load_streets(lat, lon, reach_km))
@@ -200,8 +230,12 @@ def enrich_streets(graph, lat, lon, reach_km):
         walkable_mids.append(point)
         walkable_owns.append(bearing)
 
+    # segments[4] = priznak vyznamne ulice (tertiary+); bere se od tehoz
+    # segmentu jako nazev, ne podle jmena ulice - tataz ulice muze byt jinde
+    # klidna a jinde hlavni tah.
     _match_parallel(graph, unnamed, unnamed_mids, unnamed_owns,
-                    segments, STREET_MATCH_MAX_M, "along_street")
+                    segments, STREET_MATCH_MAX_M, "along_street",
+                    extra=(segments[4], "along_major"))
 
     trails = landmarks.load_trails(lat, lon, reach_km)
     if trails:
@@ -239,11 +273,13 @@ def load_walk_graph(lat, lon, reach_km):
 
 
 def _prepare(graph, lat, lon, reach_km):
-    prepare_run_costs(graph)
+    # Poradi je podstatne: ceny hran ctou kontext (along_major, trail), ktery
+    # doplnuje az obohaceni. Kdyz obohaceni selze, ceny vyjdou jen z typu cesty.
     try:
         enrich_streets(graph, lat, lon, reach_km)
     except Exception:
         graph.graph.setdefault("street_segments", None)
+    prepare_run_costs(graph)
     return graph
 
 
@@ -865,6 +901,11 @@ LANDMARK_STREET_CLASSES = {
 }
 LANDMARK_MAX_M = 35.0
 LANDMARK_CROSS_MIN_DEG = 45.0  # min odchylka smeru, aby slo o krizeni, ne soubeh
+# Tataz ulice u dvou sousednich uzlu je jeden prechod, ne dva orientacni body
+# (siroka krizovatka ma uzlu vic). Deduplikuje se pres CELY itinerar - hranice
+# kroku neni duvod hlasit Legerovu dvakrat po sobe. Stejny prah jako u bariér
+# v landmarks.py.
+CROSSING_DEDUP_M = 400.0
 # Geometrie relace znacene trasy byva zjednodusena, takze se od cesty odchyluje
 # i o par desitek metru (mereno: cervena turisticka 24 m od pesiny, po ktere vede).
 TRAIL_MATCH_MAX_M = 35.0
@@ -931,9 +972,20 @@ def _smoothed_bearing(graph, nodes, from_start, window_m=45.0):
     return _bearing(graph, anchor, end) if from_start else _bearing(graph, end, anchor)
 
 
-def _crossed_street(graph, node):
+def _travel_bearing(graph, node_path, index):
+    """Smer, kterym trasa prochazi uzlem (tetiva pres nej). Podle nej se pozna,
+    jestli je blizka ulice krizena, nebo jen soubezna - smer proto MUSI vychazet
+    z trasy. Libovolny soused uzlu v grafu (treba bocni ulice, kterou trasa
+    nepouzije) hlasil soubezne ulice jako krizene."""
+    previous, node, following = node_path[index - 1], node_path[index], node_path[index + 1]
+    if previous == following:  # slepa odbocka tam a zpet
+        return _bearing(graph, previous, node)
+    return _bearing(graph, previous, following)
+
+
+def _crossed_street(graph, node, travel_bearing):
     """Nazev vyznamne ulice, kterou trasa v danem uzlu krizi (je blizko a kolma
-    ke smeru trasy) - orientacni bod pro tahak. Pojmenovane ulice pochazeji z
+    ke smeru behu) - orientacni bod pro tahak. Pojmenovane ulice pochazeji z
     indexu ulozeneho na grafu (enrich_streets)."""
     import numpy as np
 
@@ -951,11 +1003,7 @@ def _crossed_street(graph, node):
     if not len(close):
         return None
 
-    neighbours = list(graph.successors(node)) + list(graph.predecessors(node))
-    if not neighbours:
-        return None
-    own = _bearing(graph, node, neighbours[0]) % 180
-
+    own = travel_bearing % 180
     diff = np.abs(bearings[close] - own)
     diff = np.minimum(diff, 180 - diff)
     crossing = close[diff >= LANDMARK_CROSS_MIN_DEG]
@@ -1050,8 +1098,20 @@ def route_directions(graph, node_path):
     if len(node_path) < 2:
         return []
 
-    steps = []
+    # Kumulativni vzdalenost k jednotlivym bodum trasy. Pocita se ze SKUTECNE
+    # delky hran - stejne jako delka trasy i delka kroku. (Drive se orientacni
+    # body meraly vzdusnou carou mezi uzly; u klikatych cest to je jine meritko,
+    # takze krizeni vychazela driv, nez na ne bezec dobehl - na referencnim
+    # okruhu se obe stupnice rozesly o 340 m a krizeni se hlasila jeste pred
+    # zacatkem sveho useku.)
+    cumulative = [0.0]
     for u, v in zip(node_path, node_path[1:]):
+        cumulative.append(cumulative[-1] + float(_best_edge(graph, u, v)["length"]))
+
+    # Kroky si drzi INDEXY do node_path, ne uzly: uzel se muze na trase
+    # opakovat, index urcuje misto jednoznacne (a rovnou i jeho kilometraz).
+    steps = []
+    for index, (u, v) in enumerate(zip(node_path, node_path[1:])):
         edge = _best_edge(graph, u, v)
         name, kind = _segment_name(graph, u, v)
         label = name or kind
@@ -1066,12 +1126,13 @@ def route_directions(graph, node_path):
             steps[-1]["steps"] = steps[-1]["steps"] or steps_here
             steps[-1]["names"].append((name, length))
             steps[-1]["trails"].append((trail, length))
-            steps[-1]["nodes"].append(v)
+            steps[-1]["nodes"].append(index + 1)
         else:
             steps.append({
                 "label": label, "kind": kind, "named": bool(name), "m": length,
                 "bridge": bridge, "steps": steps_here,
-                "names": [(name, length)], "trails": [(trail, length)], "nodes": [u, v],
+                "names": [(name, length)], "trails": [(trail, length)],
+                "nodes": [index, index + 1],
             })
 
     # Kratke useky splynou se sousedem: trasa casto prebehne par metru po
@@ -1123,38 +1184,39 @@ def route_directions(graph, node_path):
         else:
             merged.append(step)
 
-    # Kumulativni vzdalenost k jednotlivym uzlum (pro km u krizeni).
-    node_at = {}
-    running = 0.0
-    for a, b in zip(node_path, node_path[1:]):
-        node_at[a] = node_at.get(a, running)
-        running += haversine_m(graph.nodes[a]["y"], graph.nodes[a]["x"],
-                               graph.nodes[b]["y"], graph.nodes[b]["x"])
-    node_at[node_path[-1]] = running
-
     labels = [step["label"] for step in merged]
     directions = []
     previous_out = None
-    cumulative_m = 0.0
+    seen_crossings = {}  # nazev ulice -> kde naposledy hlasena (pres cely itinerar)
+
     for index, step in enumerate(merged):
-        bearing_in = _smoothed_bearing(graph, step["nodes"], from_start=True)
+        step_nodes = [node_path[position] for position in step["nodes"]]
+        bearing_in = _smoothed_bearing(graph, step_nodes, from_start=True)
+        start_m = cumulative[step["nodes"][0]]
+
         # krizeni s km; vynech ulici, po ktere prave bezime nebo hned pobezime
         neighbour_labels = {step["label"]}
         if index > 0:
             neighbour_labels.add(labels[index - 1])
         if index + 1 < len(labels):
             neighbour_labels.add(labels[index + 1])
-        crossings = []
-        seen = set()
-        for node in step["nodes"][1:-1]:
-            crossed = _crossed_street(graph, node)
-            if crossed and crossed not in neighbour_labels and crossed not in seen:
-                seen.add(crossed)
-                crossings.append({"name": crossed, "at_km": round(node_at.get(node, cumulative_m) / 1000, 2)})
 
+        crossings = []
+        for position in step["nodes"][1:-1]:
+            crossed = _crossed_street(
+                graph, node_path[position], _travel_bearing(graph, node_path, position)
+            )
+            if not crossed or crossed in neighbour_labels:
+                continue
+            at_m = cumulative[position]
+            if at_m - seen_crossings.get(crossed, -math.inf) < CROSSING_DEDUP_M:
+                continue
+            seen_crossings[crossed] = at_m
+            crossings.append({"name": crossed, "at_km": round(at_m / 1000, 2)})
+
+        # Zmena nazvu ulice bez zatoceni neni pokyn - drive se hlasila jako
+        # "rovne" a delala pulku itinerare.
         turn = _turn_word(previous_out, bearing_in)
-        if turn is None and index > 0:
-            turn = "rovne"  # zmena ulice bez zatoceni
 
         # Rozcesti hlasime jen na NEZNACENYCH polnich cestach a pesinach: tam
         # hrozi navigacni chyba. Na chodnicich v zastavbe je kazdy vjezd
@@ -1163,19 +1225,14 @@ def route_directions(graph, node_path):
         trail = _vote_trail(step)
         forks = []
         if step["kind"] in FORK_REPORT_KINDS and not trail:
-            nodes = step["nodes"]
-            start_km = cumulative_m / 1000
-            end_km = (cumulative_m + step["m"]) / 1000
-            for position in range(1, len(nodes) - 1):
-                keep = _fork_at(graph, nodes[position], nodes[position - 1], nodes[position + 1])
-                if not keep:
-                    continue
-                at_km = round(node_at.get(nodes[position], cumulative_m) / 1000, 2)
-                if start_km - 0.01 <= at_km <= end_km + 0.01:
-                    forks.append({"at_km": at_km, "keep": keep})
+            for position in step["nodes"][1:-1]:
+                keep = _fork_at(graph, node_path[position],
+                                node_path[position - 1], node_path[position + 1])
+                if keep:
+                    forks.append({"at_km": round(cumulative[position] / 1000, 2), "keep": keep})
 
         directions.append({
-            "at_km": round(cumulative_m / 1000, 2),
+            "at_km": round(start_m / 1000, 2),
             "km": round(step["m"] / 1000, 2),
             "label": step["label"],
             "kind": step["kind"],
@@ -1187,8 +1244,7 @@ def route_directions(graph, node_path):
             "crossings": crossings,
             "forks": forks,
         })
-        cumulative_m += step["m"]
-        previous_out = _smoothed_bearing(graph, step["nodes"], from_start=False)
+        previous_out = _smoothed_bearing(graph, step_nodes, from_start=False)
     return directions
 
 
