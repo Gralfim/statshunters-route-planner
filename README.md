@@ -205,6 +205,15 @@ Jak to funguje:
      si nesou název (Botič, Vltava), tratě genericky „žel. trať". Křížení se hledá
      geometricky (shapely) a řadí podle vzdálenosti; ulice, po níž právě běžíme nebo
      hned poběžíme, se jako křížení neuvádí.
+   - **Značené trasy**: turistické a cyklotrasy jsou v OSM **relace**, které osmnx
+     features nevrací — stahují se přímo z Overpass (`build_trails`, 443 relací /
+     31 tis. úseků pro Prahu za ~4 s) a přiřazují hranám stejným mechanismem jako
+     ulice (atribut `trail`). V itineráři se uvádí barva značky („cervena
+     turisticka") nebo číslo cyklotrasy („cyklotrasa A22").
+   - **Rozcestí**: na **neznačených polních cestách a pěšinách** se hlásí každé
+     rozcestí s kilometráží a pokynem „drž se vlevo/vpravo" (tam hrozí navigační
+     chyba). Na chodnících v zástavbě se nehlásí (byly by desítky na kilometr)
+     a na značených trasách taky ne — tam se orientuje podle značek.
    - Zdroje (ulice, bariéry) se cachují coverage cache jako graf; první stažení pro
      Prahu je v řádu minut (geometrie Vltavy, 25 tis. ulic), pak 0,1 s. Krátké úseky
      se slučují (bezejmenné pod 250 m, pojmenované pod 100 m). V panelu pod

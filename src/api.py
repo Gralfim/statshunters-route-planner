@@ -1,10 +1,11 @@
+import traceback
 from datetime import date
 from functools import lru_cache
 from pathlib import Path
 
 import yaml
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import Response
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -28,6 +29,19 @@ CONFIG_PATH = ROOT / "config.yaml"
 WEB_DIR = Path(__file__).resolve().parent / "web"
 
 app = FastAPI(title="StatsHunters Route Planner")
+
+
+@app.exception_handler(Exception)
+def unhandled_exception(request: Request, exc: Exception):
+    """Necekana chyba: plny traceback do logu serveru (dohledatelnost priciny)
+    a zaroven typ+text do UI. Pokryva i chyby pri serializaci odpovedi, ktere
+    uvnitr endpointu zachytit nelze (napr. nan v JSON). Ocekavane stavy vraci
+    endpointy pres HTTPException a sem se nedostanou."""
+    traceback.print_exception(type(exc), exc, exc.__traceback__)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Chyba serveru: {type(exc).__name__}: {exc}"},
+    )
 
 
 @lru_cache
@@ -276,10 +290,7 @@ def plan_route(request: RouteRequest):
         raise HTTPException(status_code=400, detail="Tolerance musi byt 0.2 km az polovina delky")
 
     reach_km = (distance_km + tolerance_km) / 2 + 0.5
-    try:
-        graph = load_walk_graph(lat, lon, reach_km)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Priprava pesiho grafu selhala: {exc}")
+    graph = load_walk_graph(lat, lon, reach_km)
 
     opportunities = get_opportunities()
     try:
@@ -334,8 +345,6 @@ def plan_expedition_endpoint(request: ExpeditionRequest):
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Planovani vypravy selhalo: {exc}")
 
     run = plan["route"]
     center_lat = sum(c[0] for c in run["coordinates"]) / len(run["coordinates"])

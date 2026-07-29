@@ -6,6 +6,8 @@ cachuje stejne velkoryse jako pesi graf (pokryti + rezerva).
 """
 import json
 import math
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,7 +25,26 @@ STREET_CLASSES = [
 ]
 MAJOR_STREET_CLASSES = {"primary", "secondary", "tertiary"}
 
+# Znacene trasy (KCT, cyklotrasy) jsou v OSM relace - osmnx features je nevraci,
+# proto primy dotaz na Overpass.
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+TRAIL_COLORS = {
+    "red": "cervena", "blue": "modra", "green": "zelena", "yellow": "zluta",
+    "white": "bila", "black": "cerna", "orange": "oranzova", "purple": "fialova",
+}
+
 EARTH_RADIUS_M = 6371000.0
+
+
+def _text(value, default=None):
+    """Ocisti hodnotu z pandas: chybejici je float nan (a nan je truthy, takze
+    `value or default` NEfunguje) - vrat default. Prvni z listu vezme."""
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else None
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return default
+    text = str(value).strip()
+    return text if text and text.lower() != "nan" else default
 
 
 def _haversine_m(lat1, lon1, lat2, lon2):
@@ -91,7 +112,7 @@ def build_barriers(lat, lon, reach_km):
         water = ox.features_from_point(
             (lat, lon), tags={"waterway": ["river", "stream", "canal"]}, dist=dist
         )
-        lines += _extract_lines(water, lambda row: row.get("name") or "vodni tok")
+        lines += _extract_lines(water, lambda row: _text(row.get("name"), "vodni tok"))
     except Exception:
         pass
 
@@ -118,14 +139,64 @@ def build_streets(lat, lon, reach_km):
         features = ox.features_from_point((lat, lon), tags={"highway": STREET_CLASSES}, dist=dist)
         named = features[features["name"].notna()] if "name" in features.columns else features.iloc[:0]
         for geometry, name, highway in zip(named.geometry, named["name"], named.get("highway", "")):
+            label = _text(name)
+            if label is None:
+                continue
             major = str(highway) in MAJOR_STREET_CLASSES
-            label = name[0] if isinstance(name, list) else name
             for _, coords in _iter_lines(geometry, label):
                 lines.append([label, major, coords])
     except Exception:
         pass
 
     path = _cache_path("streets", lat, lon, max(reach_km, MIN_DOWNLOAD_REACH_KM))
+    path.write_text(json.dumps(lines, ensure_ascii=False), encoding="utf-8")
+    return lines
+
+
+def _trail_label(tags):
+    """Popis znacene trasy: turisticka podle barvy znacky, cyklotrasa podle cisla."""
+    route = tags.get("route")
+    if route in ("hiking", "foot"):
+        symbol = _text(tags.get("osmc:symbol"), "")
+        colour = symbol.split(":")[0] if symbol else _text(tags.get("colour"), "")
+        czech = TRAIL_COLORS.get(colour.lower())
+        return f"{czech} turisticka" if czech else "turisticka znacka"
+    if route == "bicycle":
+        ref = _text(tags.get("ref"))
+        return f"cyklotrasa {ref}" if ref else "cyklotrasa"
+    return None
+
+
+def build_trails(lat, lon, reach_km):
+    """Znacene turisticke a cyklo trasy jako [[label, [[lon,lat],...]], ...]."""
+    dist = int(max(reach_km, MIN_DOWNLOAD_REACH_KM) * 1000)
+    query = (
+        "[out:json][timeout:180];"
+        f"(relation[route~'^(hiking|foot|bicycle)$'](around:{dist},{lat},{lon}););"
+        "out geom;"
+    )
+    lines = []
+    try:
+        request = urllib.request.Request(
+            OVERPASS_URL,
+            data=urllib.parse.urlencode({"data": query}).encode(),
+            headers={"User-Agent": "statshunters-route-planner"},
+        )
+        with urllib.request.urlopen(request, timeout=240) as response:
+            elements = json.load(response).get("elements", [])
+        for element in elements:
+            label = _trail_label(element.get("tags", {}))
+            if not label:
+                continue
+            for member in element.get("members", []):
+                geometry = member.get("geometry")
+                if member.get("type") != "way" or not geometry or len(geometry) < 2:
+                    continue
+                lines.append([label, [[round(p["lon"], 6), round(p["lat"], 6)] for p in geometry]])
+    except Exception:
+        pass
+
+    path = _cache_path("trails", lat, lon, max(reach_km, MIN_DOWNLOAD_REACH_KM))
     path.write_text(json.dumps(lines, ensure_ascii=False), encoding="utf-8")
     return lines
 
@@ -150,6 +221,15 @@ def load_barriers(lat, lon, reach_km):
 
 def load_streets(lat, lon, reach_km):
     return _load_cached("streets", build_streets, lat, lon, reach_km)
+
+
+def load_trails(lat, lon, reach_km):
+    return _load_cached("trails", build_trails, lat, lon, reach_km)
+
+
+def line_segments(lines):
+    """Rozseka [[label, coords], ...] na segmenty: (lats, lons, bearings, labels)."""
+    return street_segments([[label, False, coords] for label, coords in lines])[:4]
 
 
 def street_segments(streets):
@@ -192,8 +272,9 @@ def barrier_crossings(coordinates, barriers):
     from shapely.geometry import LineString
     from shapely.strtree import STRtree
 
+    # _text ochrani i starou cache, kde nepojmenovany tok mohl ulozit nan
     geoms = [LineString(coords) for _label, coords in barriers if len(coords) >= 2]
-    labels = [label for label, coords in barriers if len(coords) >= 2]
+    labels = [_text(label, "vodni tok") for label, coords in barriers if len(coords) >= 2]
     if not geoms:
         return []
     tree = STRtree(geoms)

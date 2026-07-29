@@ -278,11 +278,15 @@ function renderDirections(route) {
     const steps_note = step.steps ? ' po schodech' : '';
     const bridge = step.bridge ? ' (most)' : '';
     const heading = step.start_heading ? ` <span class="dist">smer ${step.start_heading}</span>` : '';
+    const trail = step.trail ? ` <span class="trail">${step.trail}</span>` : '';
     const at = `<span class="dist">${step.at_km.toFixed(1)} km</span>`;
     const cross = (step.crossings && step.crossings.length)
       ? `<div class="cross">${step.crossings.map(c => `${c.name} (${c.at_km.toFixed(1)} km)`).join(', ')}</div>`
       : '';
-    return `<li>${at} ${turn}${step.label}${steps_note}${bridge}${heading}${cross}</li>`;
+    const forks = (step.forks && step.forks.length)
+      ? `<div class="fork">${step.forks.map(f => `${f.at_km.toFixed(2)} km drz se ${f.keep}`).join(' · ')}</div>`
+      : '';
+    return `<li>${at} ${turn}${step.label}${trail}${steps_note}${bridge}${heading}${cross}${forks}</li>`;
   }).join('');
 
   routeDirections.innerHTML =
