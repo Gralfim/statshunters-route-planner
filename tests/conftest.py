@@ -35,6 +35,6 @@ def line_graph():
 
 
 def _distance_m(a, b):
-    from routing import haversine_m
+    from geo import haversine_m
 
     return haversine_m(a[0], a[1], b[0], b[1])

@@ -9,16 +9,10 @@ se nejdriv levne ohodnoti odhadem a exaktne se planuji jen nejlepsi.
 """
 import math
 
-from routing import (
-    _candidate_groups,
-    _covering_graph_path,
-    haversine_m,
-    load_walk_graph,
-    plan_tile_loop,
-    plan_walk,
-    tile_center,
-)
+from geo import haversine_m, tile_center
+from routeplan import candidate_groups, plan_tile_loop, plan_walk
 from scoring import evaluate_tile_set
+from waygraph import covering_graph_path, load_walk_graph
 
 WALK_DETOUR = 1.3               # jen pro levne odhady pri screeningu
 HOME_WALK_REACH_KM = 3.0
@@ -127,7 +121,7 @@ def build_targets(opportunities, context):
         cand["lat"], cand["lon"] = lat, lon
 
     targets = []
-    for component in _candidate_groups(candidates):
+    for component in candidate_groups(candidates):
         for group in _split_group(component):
             tiles = {member["tile"] for member in group}
             benefit = evaluate_tile_set(tiles, context)
@@ -265,14 +259,16 @@ def _transit_candidates(start_lat, start_lon, target_km, tolerance_km, budget_mi
     return candidates
 
 
-def _plan_pure_loop(start_lat, start_lon, target_km, tolerance_km, budget_min, pace, opportunities, context):
+def _plan_pure_loop(start_lat, start_lon, target_km, tolerance_km, budget_min, pace, opportunities,
+                    context, quiet_weight=None):
     window = _loop_window(target_km, tolerance_km, 0.0, budget_min, 0.0, pace)
     if window is None:
         return None
     loop_target, loop_tolerance = window
     reach_km = (loop_target + loop_tolerance) / 2 + 0.5
     graph = load_walk_graph(start_lat, start_lon, reach_km)
-    route = plan_tile_loop(graph, start_lat, start_lon, loop_target, loop_tolerance, opportunities, context)
+    route = plan_tile_loop(graph, start_lat, start_lon, loop_target, loop_tolerance, opportunities,
+                           context, quiet_weight=quiet_weight)
     total_min = round(route["length_km"] * pace, 1)
     return {
         "kind": "loop",
@@ -329,7 +325,8 @@ def _return_options(network, candidate, origin_ids, day, home_costs):
 
 
 def _plan_transit_expedition(candidate, start_lat, start_lon, pace, budget_min,
-                             opportunities, context, network, origin_ids, day):
+                             opportunities, context, network, origin_ids, day,
+                             quiet_weight=None):
     board = candidate["board"]
     alight = candidate["alight"]
     conn_out = candidate["connection"]
@@ -369,6 +366,7 @@ def _plan_transit_expedition(candidate, start_lat, start_lon, pace, budget_min,
     route = plan_tile_loop(
         graph, alight["lat"], alight["lon"], run_target, run_tolerance,
         opportunities, context, end_lat=return_stop["lat"], end_lon=return_stop["lon"],
+        quiet_weight=quiet_weight,
     )
 
     run_km = round(route["length_km"] + walks_km, 2)
@@ -395,7 +393,8 @@ def _plan_transit_expedition(candidate, start_lat, start_lon, pace, budget_min,
 
 
 def plan_expedition(start_lat, start_lon, target_km, tolerance_km, budget_min, pace,
-                    opportunities, context, network, targets, day="weekday"):
+                    opportunities, context, network, targets, day="weekday",
+                    quiet_weight=None):
     home_stops = network.stops_near(start_lat, start_lon, HOME_STOP_RADIUS_M)[:HOME_STOP_LIMIT]
     origin_ids = [stop_id for _, stop_id in home_stops]
 
@@ -409,13 +408,14 @@ def plan_expedition(start_lat, start_lon, target_km, tolerance_km, budget_min, p
     # exaktne planuj: kandidaty s uz stazenym grafem maji prednost (bez cekani)
     def has_cached_graph(candidate):
         reach = (candidate["loop_target"] + candidate["loop_tolerance"]) / 2 + 0.5
-        return _covering_graph_path(candidate["alight"]["lat"], candidate["alight"]["lon"], reach) is not None
+        return covering_graph_path(candidate["alight"]["lat"], candidate["alight"]["lon"], reach) is not None
 
     ordered = sorted(candidates, key=lambda c: (not has_cached_graph(c), -c["target"]["benefit"]))
 
     plans = []
     pure = _plan_pure_loop(
-        start_lat, start_lon, target_km, tolerance_km, budget_min, pace, opportunities, context
+        start_lat, start_lon, target_km, tolerance_km, budget_min, pace, opportunities, context,
+        quiet_weight=quiet_weight,
     )
     if pure:
         plans.append(pure)
@@ -425,6 +425,7 @@ def plan_expedition(start_lat, start_lon, target_km, tolerance_km, budget_min, p
             plans.append(_plan_transit_expedition(
                 candidate, start_lat, start_lon, pace, budget_min,
                 opportunities, context, network, origin_ids, day,
+                quiet_weight=quiet_weight,
             ))
         except RuntimeError:
             continue

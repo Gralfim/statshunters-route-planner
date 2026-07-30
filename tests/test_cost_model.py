@@ -1,7 +1,7 @@
 """Cena hran pro beh: poradi preferenci typu cest a kontext, ve kterem cesta vede."""
 import pytest
 
-from routing import RUN_PREFERENCES, prepare_run_costs
+from runcost import RUN_PREFERENCES, prepare_run_costs
 
 
 def cost_of(line_graph, **tags):

@@ -8,7 +8,7 @@ import math
 
 import pytest
 
-from routing import route_directions
+from itinerary import route_directions
 
 LAT = 50.0
 NODE_SPACING_M = 100.0

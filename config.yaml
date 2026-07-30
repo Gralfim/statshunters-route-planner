@@ -6,6 +6,9 @@ target_distance_km: 15
 distance_tolerance_km: 3
 run_pace_min_per_km: 6.0
 expedition_budget_min: 120
+# Jak silne se pri vyberu trasy pocita podil delky vedouci podel vyznamnych ulic:
+# 0 = jen sbirej dlazdice, 1 = co nejvic klidu. V mape jde prestavit posuvnikem.
+quiet_weight: 0.6
 mapy_cz:
   # Podkladova turisticka mapa v UI (znacene trasy a cyklostezky). Klic zdarma
   # na https://developer.mapy.com; lze zadat i pres promennou prostredi

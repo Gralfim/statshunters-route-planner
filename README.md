@@ -58,6 +58,7 @@ target_distance_km: 15       # cílová délka trasy
 distance_tolerance_km: 3     # tolerance ±
 run_pace_min_per_km: 6.0     # tempo běhu (pro časový rozpočet výprav)
 expedition_budget_min: 120   # výchozí časový rozpočet celé výpravy
+quiet_weight: 0.6            # 0 = jen sběr dlaždic, 1 = klid a značené trasy
 mapy_cz:
   api_key: ""                # turistický podklad v mapě; bez klíče se použije OSM
 statshunters:
@@ -85,7 +86,11 @@ resp. `/api/expedition`).
 | `src/square.py` | největší plně pokrytý čtverec (DP) |
 | `src/scoring.py` | bodování kandidátních tiles: 9 priorit (square/cluster/nenavštívený × 3 období) + bonus za stáří poslední návštěvy |
 | `src/statshunters.py` | klient StatsHunters share API — stránkované stahování aktivit do `data/` |
-| `src/routing.py` | plánování běhů: pěší graf OSM (osmnx), výběr tiles, preference cest, penalizace opakování, GPX |
+| `src/geo.py` | geometrie na kouli, azimuty, čtení OSM tagů — nejnižší vrstva bez závislostí |
+| `src/runcost.py` | **cenový model**: preference typů cest + kontext (podél čeho vede, značená trasa), měření délky po grafu |
+| `src/waygraph.py` | pěší graf OSM: stažení z Overpass, tři vrstvy cache, obohacení (názvy ulic, značky), prostorové indexy |
+| `src/routeplan.py` | výběr trasy: které dlaždice a v jakém pořadí, portfolio variant, cílová funkce, GPX, CLI |
+| `src/itinerary.py` | itinerář běhu — tahák na trasu (kroky, kilometráž, odbočky, orientační body, rozcestí) |
 | `src/transit.py` | síť MHD z PID GTFS + router spojení (min. přestupů, priorita druhů) |
 | `src/expedition.py` | výpravy: cílové oblasti, spojení tam/zpět, časový rozpočet |
 | `src/landmarks.py` | vodní toky a železnice (osmnx features) + geometrické křížení pro itinerář |
@@ -144,7 +149,7 @@ aby nepřekrývaly popupy tiles a doporučení.
 | `GET /api/periods/{period}/cluster` | obrys největšího clusteru |
 | `GET /api/periods/{period}/square` | obrys největšího čtverce |
 | `GET /api/opportunities` | doporučené tiles seřazené podle skóre (rank, důvody, přínosy, stáří poslední návštěvy) |
-| `POST /api/route` | naplánuje okruh; JSON body `{lat, lon, distance_km, tolerance_km}` (vše volitelné, výchozí z configu); vrací délku, waypointy, protnuté tiles, souřadnice i GPX |
+| `POST /api/route` | naplánuje okruh; JSON body `{lat, lon, distance_km, tolerance_km, quiet_weight}` (vše volitelné, výchozí z configu); vrací délku, waypointy, protnuté tiles, souřadnice, měrky kvality i GPX |
 | `POST /api/expedition` | naplánuje celou výpravu (běh + volitelně MHD); body navíc `{budget_min, pace_min_per_km}`; vrací segmenty (běh na zastávku / MHD / okruh / návrat), časy a alternativní směry |
 | `POST /api/sync` | stáhne čerstvá data ze StatsHunters, přepíše `data/` a vyčistí cache |
 | `GET /api/tiles`, `/api/frontier`, … | aliasy pro období `all` |
@@ -175,18 +180,28 @@ další přeplánování je pod sekundu.
 
 ```bash
 # totez z prikazove radky
-python src/routing.py --gpx route.gpx
-python src/routing.py --lat 50.1030 --lon 14.4500 --distance 10 --tolerance 2
+python src/routeplan.py --gpx route.gpx
+python src/routeplan.py --lat 50.1030 --lon 14.4500 --distance 10 --tolerance 2
 ```
 
 Jak to funguje:
 
-1. **Pěší graf OSM** se stáhne z Overpass API kolem startu (poprvé jednotky minut) a cachuje
-   do `data/walk_<lat>_<lon>_<reach>km.graphml`. Cache je podle **pokrytí**: použije se
-   jakýkoli uložený graf, jehož kruh pokrývá požadovaný start + dosah (s tolerancí 1,5 km —
-   dosah je horní odhad a chybějící vnější lem trasu nerozbije); stahuje se velkoryse
-   (min. 10 km), takže změna délky ani startu v okolí nevyvolá nové stahování. Načtený graf
-   zůstává v paměti serveru.
+1. **Pěší graf OSM** (`src/waygraph.py`) se stáhne z Overpass API kolem startu (poprvé
+   jednotky minut) a cachuje do `data/walk_<lat>_<lon>_<reach>km.graphml`. Nad tím jsou
+   ještě dvě vrstvy cache:
+   - Cache graphml je podle **pokrytí**: použije se jakýkoli uložený graf, jehož kruh pokrývá
+     požadovaný start + dosah (s tolerancí 1,5 km — dosah je horní odhad a chybějící vnější
+     lem trasu nerozbije); stahuje se velkoryse (min. 10 km), takže změna délky ani startu
+     v okolí nevyvolá nové stahování.
+   - **Připravený graf** (názvy ulic, značené trasy, ceny hran) se ukládá jako
+     `data/walk_*.prepared-<otisk>.pkl`. Parsování graphml trvá ~22 s a příprava dalších
+     ~6 s; z pickle je to **~4 s** (7× rychleji, soubor 79 MB = polovina graphml). V názvu je
+     **otisk parametrů**, které přípravu ovlivňují (preference cest, `ALONG_MAJOR_FACTOR`,
+     `TRAIL_BONUS`, prahy párování ulic) — po jejich změně se stará cache nenajde a nová
+     vznikne vedle; staré otisky téhož grafu se mažou. Bez toho by se po ladění preferencí
+     tiše plánovalo podle starých cen. Zápis je atomický přes `.tmp`, poškozený soubor se
+     zahodí a přepočítá.
+   - Načtený graf zůstává v paměti serveru.
 2. **Výběr trasy porovnáním variant**: staví se portfolio okruhů — rank-greedy seed
    (cheapest insertion na odhadech vzdušná čára × 1,35), seedy kolem **skupin
    sousedících kandidátů** (4-okolí) a **seedy na dokompletování square** (okna
@@ -206,14 +221,70 @@ Jak to funguje:
    vylepšit přidáváním nevyužitých kandidátů (2 kola). Při přetečení tolerance
    odpadá nejslabší waypoint; naopak pokud trasa nedosáhne spodní hranice, dotáhne
    se přes další tiles v dosahu (`_extend_to_window`).
-3. **Kudy tile protnout**: waypoint není střed dlaždice, ale uzel uvnitř ní, který
+3. **Cílová funkce** (`_variant_score`) — přínos postupně snižovaný třemi **podílovými**
+   měrkami kvality:
+
+   ```
+   skóre = přínos × (1 − 0,5  × podíl opakovaných ulic)
+                  × (1 − váha klidu × podíl délky podél významných ulic)
+                  × (1 − váha klidu × 0,5 × podíl délky MIMO značené trasy)
+                  × (1 − 0,35 × odchylka délky od cíle / tolerance)
+   ```
+
+   Podíly, ne absolutní hodnoty — s absolutní penalizací byl vždy nejvýhodnější
+   nejkratší přípustný okruh. Násobení přínosem drží měřítko a nedovolí zápornou
+   hodnotu; skóre nikdy nepřeroste přínos.
+   - **Podíl podél významných ulic** — bez něj plánovač neuměl porovnat „hodně
+     dlaždic po magistrále" s „míň dlaždic po klidu": vzal první a druhou variantu
+     ani nepostavil.
+   - **Podíl mimo značené trasy** — druhá strana téže preference. „Nevede podél
+     magistrály" je jen nepřítomnost špatného; značka vede údolím, parkem nebo podél
+     vody, a to je to, co trasu opravdu odliší. Bez tohoto členu posuvník narazil na
+     strop: v portfoliu ležela trasa se **72 % délky po značkách** a prohrávala
+     s trasou se 47 %, protože ji nic neodměňovalo. Penalizuje se podíl *mimo* značky,
+     aby skóre nikdy nepřerostlo přínos.
+
+   Váha obou je **runtime parametr** (posuvník *sběr dlaždic ↔ klid a značky*
+   v panelu, `quiet_weight` v `POST /api/route`, výchozí z configu), protože je to
+   preference, ne fyzika. Do portfolia navíc přibývají **klidné varianty**: tytéž
+   cílové dlaždice, ale úsek se hledá s přirážkou cestám podél významných ulic a se
+   slevou značeným trasám — dvě úrovně (`QUIET_LEG_PROFILES`), stejným vzorcem jako
+   nízkoopakovací varianty. Naměřeno na okruhu 15 ± 3 km z Karlova nám.:
+
+   | váha klidu | podél rušných | po značkách | délka | přínos | shoda s vahou 0 |
+   |---|---|---|---|---|---|
+   | 0,0–0,4 | 8,6 % | 54,2 % | 15,10 km | 118,7 | 100 % |
+   | 0,6 | 1,5 % | 47,1 % | 14,93 km | 112,5 | 53 % |
+   | 0,8–1,0 | 0,9 % | **78,6 %** | 16,19 km | 112,5 | **24 %** |
+
+   Úrovně přirážky **nezávisí na posuvníku** — mají být pevnou sadou kandidátů, ze
+   které si váha vybírá. Když přirážka škálovala s vahou, měl plánovač při každé váze
+   jen jednu klidnou variantu; silnější přirážka dělala delší trasu, tu potrestala
+   penalizace odchylky délky a vyhrála základní varianta, takže posuvník vycházel
+   **nemonotónně** (váha 0,6 dala 8,6 % podél rušných ulic, zatímco 0,2 jen 0,9 %).
+   - **Odchylka délky od cíle** — tolerance byla zavedena jen jako obálka
+     splnitelnosti, ale bez tohoto členu se z ní stala preference: delší trasa protne
+     víc dlaždic, takže vyhrávaly trasy u horní hranice. Teď je horní hranice pořád
+     přípustná, jen ji trasa musí vyplatit vyšším přínosem. Doplňuje to
+     `_shrink_toward_target` — zrcadlový protějšek `_extend_to_window`, který
+     z příliš dlouhé trasy zkouší vypustit waypoint. Pracuje se **skutečnou** délkou:
+     odhad (`_estimate_path_m`) systematicky podstřeluje, takže sekvenci naplněnou
+     „jen po cíl" exaktní přepočet stejně vyžene nad cíl. Naměřeno: cíl 15 ± 3 km →
+     14,93 km (2 % tolerance), cíl 10 ± 2 km → 11,45 → **10,84 km**.
+
+   Cílová funkce **smí** delší trasu vybrat, když se vyplatí. U cíle 20 ± 4 km z Karlova
+   nám. měla na výběr 19,97 km s přínosem 308 a vybrala 22,47 km s přínosem 410 — 33 %
+   víc dlaždic za 12 % délky. Kdo chce cílovou délku držet tvrději, má na to
+   `LENGTH_PENALTY_FRACTION`; zúžit toleranci teď taky funguje (15 ± 1 km dá tutéž
+   trasu jako 15 ± 3 km).
+4. **Kudy tile protnout**: waypoint není střed dlaždice, ale uzel uvnitř ní, který
    nejméně zajíždí z předchozího bodu k dalšímu cíli — trasa se tak dlaždice dotkne
    tam, kudy stejně vede. Kvůli chybě GPS/navigace se drží **rezerva 75 m od hranice**
    (`TILE_MARGIN_M`), takže trasa vede prokazatelně dovnitř; naměřená hloubka průniku
    na reálných trasách je 220–540 m. Odhady délky s tím počítají (waypoint má
    efektivní poloměr ~700 m) — bez té korekce nadhodnocovaly délku 1,5–4× a trasy
    vycházely zbytečně krátké.
-4. **Ořez ocásků**: slepé úseky tam-a-zpět se zkracují na nejmenší délku, která
+5. **Ořez ocásků**: slepé úseky tam-a-zpět se zkracují na nejmenší délku, která
    zachová množinu protnutých tiles — přínos se nemění, hluchá vzdálenost mizí.
    Navíc se **penalizuje průchod stejnou ulicí**: hrana už použitá na trase se při
    plánování dalšího úseku zdraží, takže se okruh vrací jinudy. Nízkoopakovací
@@ -222,7 +293,7 @@ Jak to funguje:
    (1 − 0,5 × **podíl** opakovaných metrů). Podíl, ne absolutní kilometry — s
    absolutní penalizací vycházel vždy nejlevněji nejkratší přípustný okruh.
    Míra vyhýbání je laditelná konstantou `REPEAT_PENALTY_FRACTION`.
-5. **Kontext cesty, ne jen její typ** — typ sám o sobě nestačí: v pěším grafu je
+6. **Kontext cesty, ne jen její typ** — typ sám o sobě nestačí: v pěším grafu je
    přes 80 % délky `footway`, takže chodník podél čtyřproudé silnice vypadal stejně
    dobře jako pěšina v parku, a protože je levnější než klidná ulice (0,85 vs. 1,0),
    trasy se na velké tahy přímo lepily. Chodníkům a cestám vedeným podél **významné
@@ -234,7 +305,7 @@ Jak to funguje:
    po značených trasách 44,8 % → 64,5 %, při stejné délce. Cenou je nižší přínos
    (209 → 43, celý rozdíl leží ve 3měsíční vrstvě) — dokud kvalita cest není v cílové
    funkci výběru variant, plánovač tenhle kompromis nevolí vědomě (viz Další kroky).
-6. **Itinerář běhu** (`route_directions` + `src/landmarks.py`) — tahák na trasu: úseky
+7. **Itinerář běhu** (`route_directions` + `src/landmarks.py`) — tahák na trasu: úseky
    se stejným popisem sloučené, s **kumulativní vzdáleností od startu** (akční bod:
    „v 0,5 km vpravo Ke Karlovu"), směrem zatočení, „po schodech", označením mostů,
    u prvního kroku světovou stranou a **orientačními body s km** (co a kde trasa kříží).
@@ -279,14 +350,17 @@ Jak to funguje:
      od startu běhu a kolik zbývá (jako v mapy.cz), s kroužkem na nejbližším bodě
      trasy. Slouží k přesnému popisu míst („nepřesnost v 3,2 km"). Počítá se v
      prohlížeči z bodů trasy — souhlasí s délkou i itinerářem na jednotky metrů.
-6. **Výstup**: délka, waypoint tiles, všechny protnuté tiles (počítané z plné
+8. **Výstup**: délka, waypoint tiles, všechny protnuté tiles (počítané z plné
    geometrie hran — trasy v mapě i GPX kopírují skutečné tvary ulic), rozpad
-   přínosu, itinerář, počet porovnaných variant, GPX.
+   přínosu, itinerář, počet porovnaných variant, GPX. Navíc **měrky, podle kterých
+   se trasa vybrala** (`along_major_km/_share`, `trail_km/_share`, `repeated_km`,
+   `quiet_weight`, výsledné `score`) — panel je ukazuje pod přínosem, jinak by
+   nešlo poznat, co posuvník udělal.
 
-Naměřeno (Praha, okolí Karlova náměstí, graf 141 810 uzlů): plánování okruhu
-**0,1–10 s** podle délky a počtu variant (15±3 km ≈ 10 s, kratší okruhy pod 1 s);
-jednorázově načtení grafu z cache ~24 s a scoring ~9 s (obojí si server podrží
-v paměti).
+Naměřeno (Praha, okolí Karlova náměstí, graf 141 810 uzlů / 397 646 hran): plánování okruhu
+**0,1–10 s** podle délky a počtu variant (15±3 km ≈ 6–10 s, kratší okruhy pod 1 s);
+jednorázově načtení grafu **~4 s z pickle cache** (dřív 22 s parsování graphml + 6 s příprava)
+a scoring ~9 s — obojí si server podrží v paměti.
 
 
 ## Testy
@@ -305,6 +379,8 @@ pytest -m slow         # kontrolní měření na skutečném grafu Prahy (~1 min
 | `tests/test_itinerary.py` | kilometráž kroků i orientačních bodů, souběžná ulice není křížení, deduplikace napříč kroky, žádné „rovne" |
 | `tests/test_route_quality.py` | *(slow)* podíl délky podél významných ulic a klidných cest, dodržení tolerance, konzistence kilometráže na reálné trase |
 | `tests/test_basemap.py` | zdroj API klíče (env > config), fallback na OSM bez klíče, placeholdery v URL dlaždic |
+| `tests/test_graph_cache.py` | cache připraveného grafu: zneplatnění při změně parametrů, round-trip, úklid starých otisků, odolnost proti poškozenému souboru |
+| `tests/test_objective.py` | cílová funkce: skóre nikdy nepřeroste přínos ani nespadne pod nulu, symetrie penalizace délky, váha klidu i značené trasy umí přehodit vítěze |
 
 Rychlé testy běží nad **ručně postavenými grafy** (`line_graph` fixture v `conftest.py`) —
 délky hran se zadávají nezávisle na vzdálenosti uzlů, protože v OSM `length` kopíruje
@@ -367,7 +443,7 @@ v panelu; čistý okruh bez MHD je vždy jednou z porovnávaných variant.
 **Hotové (commitnuté):** mapa s tiles pro 3 časová období, obrysy max clusteru a max square, panel se statistikami, scoring doporučených tiles (`/api/opportunities`).
 
 **Nové (zatím necommitnuté):**
-- plánování okruhů (`src/routing.py` + `POST /api/route` + UI v mapě) — špendlík startu, délka/tolerance v panelu, vykreslení trasy, GPX ke stažení; po warm-upu přeplánování 0,3–1,7 s,
+- plánování okruhů (`src/routeplan.py` + `POST /api/route` + UI v mapě) — špendlík startu, délka/tolerance v panelu, vykreslení trasy, GPX ke stažení; po warm-upu přeplánování 0,3–1,7 s,
 - **optimalizace společného přínosu**: trasa se vybírá porovnáním variant podle skutečného zisku statistik celé množiny protnutých tiles; square vážený plochou + seedy na dokompletování square (ověřený postup zlepšení z Karlova nám.: greedy 18,6 → portfolio 36,9 → square-aware 96,6, trasa 4×4 → 5×5 přes Košíře); rozpad přínosu se zobrazuje v panelu,
 - **kvalita tras**: preference typů cest pro běh (cyklostezka > turistická cesta > park/pěší zóna > chodník > klidná ulice; rušné silnice penalizované) — trasa Karlovo nám. → Podolí přešla z 77 % preferovaných / 21 % silnic na 98 % preferovaných / 1 % silnic při stejné délce; trasy a GPX nově kopírují skutečné geometrie ulic (896 bodů místo ~370 uzlů).
   **Pozor na tuhle metriku**: počítá `footway` jako „preferovanou cestu" bez ohledu na to, podél čeho vede, takže vypadala výborně i pro okruh, kterému 63 % délky vedlo po chodnících podél magistrál. Skutečnou kvalitu měří až podíl délky **podél významných ulic** (viz bod 5 v „Plánování tras" a `tests/test_route_quality.py`),
@@ -386,51 +462,58 @@ v cenách hran a čtyři vady itineráře (viz „Plánování tras", body 5 a 6
 
 **Nejbližší (P1) — jádro kvality výstupů:**
 
-1. **Kvalita cest do cílové funkce.** Dnes je `_variant_score` = přínos × (1 − 0,5 × podíl
-   opakování); kvalita cest v ní **není**. Plánovač proto neumí porovnat „přínos 209 po
-   magistrále" s „přínos 43 po klidu" — vybere první a druhou variantu ani nepostaví. Doplnit
-   člen za podíl délky podél významných ulic a přidat do portfolia variantu počítanou s
-   vyhýbáním (stejným vzorem jako `AVOID_VARIANTS` pro opakování). Váhu vystavit v UI jako
-   posuvník *přínos ↔ klid*; teprve pak dává smysl přesunout `ALONG_MAJOR_FACTOR` a
-   `TRAIL_BONUS` do `config.yaml`.
-2. **Itinerář na rozhodovacích bodech.** Dnes vzniká řádek na každou změnu názvu cesty —
+1. ~~Kvalita cest do cílové funkce.~~ **Hotovo (07/2026):** `_variant_score` má člen za podíl
+   délky podél významných ulic i za odchylku délky od cíle, do portfolia přibyly klidné
+   varianty a váha klidu je posuvník v panelu (`quiet_weight`). Viz „Cílová funkce" výše.
+   Zbývá případně: vystavit `LENGTH_PENALTY_FRACTION` a `QUIET_LEG_FACTOR` do `config.yaml`,
+   jestli se ukáže potřeba je ladit jinde než v kódu.
+2. **Opakování koridoru, ne jen hrany.** `repeated_m` počítá druhý průchod **toutéž**
+   hranou. Trasa, která jde údolím tam po jedné straně a zpět po druhé (nebo po
+   souběžné pěšině), má opakování nulové a přitom vypadá jako pořád totéž — a při
+   vysoké váze klidu, kde je na výběr málo cest, se to děje. Naměřeno při váze 1,0:
+   opakování 0–1 % (Karlovo nám. i Zahradní Město), takže současná metrika ten jev
+   nezachytí. Chtělo by to měřit blízkost trasy k sobě samé (např. podíl délky, která
+   vede do X metrů od dřívějšího úseku), a teprve to dát do cílové funkce.
+3. **Itinerář na rozhodovacích bodech.** Dnes vzniká řádek na každou změnu názvu cesty —
    běžec potřebuje řádek tam, kde se dá zabloudit, plus průběžné potvrzovací záchytné body.
    Na referenční trase je ~109 ostrých odboček na křižovatkách proti 21 pokynům; slučování
    krátkých úseků (`STEP_MIN_M`) navíc rozhodovací body maže. Přidat odstupňování odbočky
    („mírně/ostře" — dnes je 35–150° všechno stejné „vlevo") a čas úseku podle tempa.
-3. **Dlaždice v itineráři.** `directions` o cílových dlaždicích neobsahují nic, ačkoli
+4. **Dlaždice v itineráři.** `directions` o cílových dlaždicích neobsahují nic, ačkoli
    `waypoint_tiles` v odpovědi je. Označit kroky, kde trasa sbírá cílovou dlaždici, včetně
    pokynu, jak hluboko dovnitř — bez toho itinerář ignoruje účel celé aplikace.
-4. **Popisky, které nelžou.** Nepojmenovaný chodník dědí název souběžné ulice do 40 m, takže
+5. **Popisky, které nelžou.** Nepojmenovaný chodník dědí název souběžné ulice do 40 m, takže
    „Bělehradská" může být pěšina v parku vedle ní; `_vote_step_name` pojmenuje krok ulicí
    pokrývající jen 40 % délky; `absorb` neaktualizuje `named`/`kind`, takže se pohlcený úsek
    může vydávat za jiný typ cesty (a `kind` řídí hlášení rozcestí).
-5. **Rozdělit `src/routing.py`** (1 254 řádků, čtyři odpovědnosti: načtení grafu, cenový model,
-   kombinatorika dlaždic, itinerář) — nejlépe **před** bodem 2, který itinerář stejně přepisuje.
-   Předtím doplnit **cache připraveného grafu** (pickle včetně `run_cost`/`along_major`/`trail`):
-   dnes se každý start serveru i každý běh `pytest -m slow` platí 30 s parsováním graphml.
+6. ~~Rozdělit `src/routing.py` a přidat cache připraveného grafu.~~ **Hotovo (07/2026):**
+   1 254řádkový `routing.py` je rozdělený na `geo` / `runcost` / `waygraph` / `routeplan` /
+   `itinerary` (viz tabulka struktury) a připravený graf se cachuje do pickle. Ověřeno
+   head-to-head proti verzi před refaktorem na témž grafu a týchž datech: shodná délka,
+   přínos, waypointy, souřadnice i celý itinerář včetně křížení a rozcestí. `pytest -m slow`
+   spadl z 57 s na 21 s.
 
 **Dále (P2) — nová data:**
 
-6. **Převýšení** (SRTM raster lokálně nebo OpenTopoData) — pro Prahu zásadní veličina, dnes
+7. **Převýšení** (SRTM raster lokálně nebo OpenTopoData) — pro Prahu zásadní veličina, dnes
    chybí úplně: ani v ceně hran, ani v itineráři.
-7. **Rozšířit `useful_tags_way`** o `surface`, `footway`, `tracktype`, `lit`, `incline`,
+8. **Rozšířit `useful_tags_way`** o `surface`, `footway`, `tracktype`, `lit`, `incline`,
    `sidewalk` — bez `surface` nejde odlišit asfalt od bláta, bez `footway=crossing` přechod
    přes magistrálu. Pozor: vynutí to nové stažení všech grafů a zneplatní `data/*.graphml`.
    (V grafu naopak už *jsou* a nepoužívají se `maxspeed` a `lanes` — dobré proxy pro provoz.)
-8. **Parky a lesy** jako polygony (`leisure=park`, `landuse=forest`) — dnes je běh parkem
+9. **Parky a lesy** jako polygony (`leisure=park`, `landuse=forest`) — dnes je běh parkem
    k nerozeznání od chodníku vedle něj.
 
 **Průběžně:**
 
-9. **Asynchronní příprava nové oblasti** — `POST /api/route` v úplně nové oblasti blokuje na
+10. **Asynchronní příprava nové oblasti** — `POST /api/route` v úplně nové oblasti blokuje na
    minuty (Overpass download) a hrozí timeout prohlížeče; převést na úlohu na pozadí.
-10. **Výpravy s MHD — další iterace**: nesymetrický návrat, reálné intervaly linek místo
+11. **Výpravy s MHD — další iterace**: nesymetrický návrat, reálné intervaly linek místo
     paušálního čekání (GTFS frequencies), přesnost pěších přesunů (teď vzdušná čára × 1,3).
     Náklady na dopravu zůstávají route-level, nikdy ve skóre tile.
-11. **Výkon `/api/opportunities`** — `_measure_gain` přepočítává celý cluster/square pro každého
+12. **Výkon `/api/opportunities`** — `_measure_gain` přepočítává celý cluster/square pro každého
     kandidáta; s růstem dat zvážit inkrementální výpočet a persistentní cache.
-12. **Testy dál**: `statshunters` sync klient (má přepsatelnou `STATSHUNTERS_BASE_URL`, jde
+13. **Testy dál**: `statshunters` sync klient (má přepsatelnou `STATSHUNTERS_BASE_URL`, jde
     testovat proti lokálnímu falešnému serveru), `transit`/`expedition` (dnes nepokryté).
-13. **Drobnosti:** sjednotit duplicitní frontier logiku (`frontier.py` vs. `_frontier_tiles` ve
+14. **Drobnosti:** sjednotit duplicitní frontier logiku (`frontier.py` vs. `_frontier_tiles` ve
     `scoring.py`), konfigurovatelný typ aktivity, UI filtr top-N doporučení.

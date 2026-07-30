@@ -16,12 +16,13 @@ from landmarks import annotate_directions
 from frontier import frontier_tiles
 from geojson import feature_collection, tile_feature, tile_outline_feature_collection
 from load import load_activities
-from routing import load_walk_graph, plan_tile_loop, route_to_gpx
+from routeplan import plan_tile_loop, route_to_gpx
 from scoring import build_route_context, find_tile_opportunities
 from square import find_largest_square
 from statshunters import resolve_share_link, sync_activities
 from tiles import build_tile_database
 from transit import TransitNetwork, load_transit_graph
+from waygraph import load_walk_graph
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -179,6 +180,7 @@ def summary():
         "distance_tolerance_km": config["distance_tolerance_km"],
         "expedition_budget_min": config.get("expedition_budget_min", 120),
         "run_pace_min_per_km": config.get("run_pace_min_per_km", 6.0),
+        "quiet_weight": config.get("quiet_weight", 0.6),
         "periods": periods,
     }
 
@@ -284,6 +286,15 @@ class RouteRequest(BaseModel):
     lon: float | None = None
     distance_km: float | None = None
     tolerance_km: float | None = None
+    quiet_weight: float | None = None
+
+
+def _quiet_weight(requested):
+    """Vaha klidu 0..1 (posuvnik v UI), vychozi z configu."""
+    value = requested if requested is not None else get_config().get("quiet_weight", 0.6)
+    if not 0 <= value <= 1:
+        raise HTTPException(status_code=400, detail="Vaha klidu musi byt 0 az 1")
+    return value
 
 
 @app.post("/api/route")
@@ -293,6 +304,7 @@ def plan_route(request: RouteRequest):
     lon = request.lon if request.lon is not None else config["home"]["lon"]
     distance_km = request.distance_km if request.distance_km is not None else config["target_distance_km"]
     tolerance_km = request.tolerance_km if request.tolerance_km is not None else config["distance_tolerance_km"]
+    quiet_weight = _quiet_weight(request.quiet_weight)
 
     if not 2 <= distance_km <= 42:
         raise HTTPException(status_code=400, detail="Delka trasy musi byt 2 az 42 km")
@@ -304,7 +316,8 @@ def plan_route(request: RouteRequest):
 
     opportunities = get_opportunities()
     try:
-        route = plan_tile_loop(graph, lat, lon, distance_km, tolerance_km, opportunities, get_route_context())
+        route = plan_tile_loop(graph, lat, lon, distance_km, tolerance_km, opportunities,
+                               get_route_context(), quiet_weight=quiet_weight)
     except RuntimeError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -323,6 +336,7 @@ class ExpeditionRequest(BaseModel):
     budget_min: float | None = None
     pace_min_per_km: float | None = None
     weekend: bool | None = None
+    quiet_weight: float | None = None
 
 
 @app.post("/api/expedition")
@@ -334,6 +348,7 @@ def plan_expedition_endpoint(request: ExpeditionRequest):
     tolerance_km = request.tolerance_km if request.tolerance_km is not None else config["distance_tolerance_km"]
     budget_min = request.budget_min if request.budget_min is not None else config.get("expedition_budget_min", 120)
     pace = request.pace_min_per_km if request.pace_min_per_km is not None else config.get("run_pace_min_per_km", 6.0)
+    quiet_weight = _quiet_weight(request.quiet_weight)
 
     if not 2 <= distance_km <= 42:
         raise HTTPException(status_code=400, detail="Delka trasy musi byt 2 az 42 km")
@@ -351,7 +366,7 @@ def plan_expedition_endpoint(request: ExpeditionRequest):
         plan = plan_expedition(
             lat, lon, distance_km, tolerance_km, budget_min, pace,
             get_opportunities(), get_route_context(), get_transit_network(), get_expedition_targets(),
-            day=day,
+            day=day, quiet_weight=quiet_weight,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=422, detail=str(exc))

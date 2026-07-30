@@ -319,6 +319,8 @@ async function loadSummary() {
   routeTolerance.value = summary.distance_tolerance_km;
   routeBudget.value = summary.expedition_budget_min;
   routePace.value = summary.run_pace_min_per_km;
+  routeQuiet.value = summary.quiet_weight;
+  renderQuietLabel();
   setStart(summary.home.lat, summary.home.lon);
 
   // Meritko se nastavi hned podle (rychle) vrstvy tiles; teprve pak se dokresluji
@@ -333,8 +335,26 @@ const routeDistance = document.querySelector('#route-distance');
 const routeTolerance = document.querySelector('#route-tolerance');
 const routeBudget = document.querySelector('#route-budget');
 const routePace = document.querySelector('#route-pace');
+const routeQuiet = document.querySelector('#route-quiet');
+const routeQuietLabel = document.querySelector('#route-quiet-label');
 const routeWeekend = document.querySelector('#route-weekend');
 routeWeekend.checked = [0, 6].includes(new Date().getDay());
+
+// Posuvnik prinos <-> klid: jak silne se do vyberu trasy pocita podil delky
+// vedouci podel vyznamnych ulic.
+function describeQuiet(value) {
+  if (value <= 0) return 'jen sber dlazdic';
+  if (value < 0.35) return 'prevazne sber dlazdic';
+  if (value < 0.75) return 'vyvazene';
+  if (value < 1) return 'prevazne klid';
+  return 'klid za kazdou cenu';
+}
+
+function renderQuietLabel() {
+  routeQuietLabel.textContent = describeQuiet(Number(routeQuiet.value));
+}
+
+routeQuiet.addEventListener('input', renderQuietLabel);
 const routeStartText = document.querySelector('#route-start');
 const planButton = document.querySelector('#plan');
 const planExpeditionButton = document.querySelector('#plan-expedition');
@@ -391,12 +411,31 @@ function renderBenefit(route) {
     .filter(([, gain]) => gain > 0)
     .map(([key, gain]) => `+${gain} ${GAIN_LABELS[key] || key}`);
   const repeated = route.repeated_km > 0
-    ? `<br>opakovani ulic: ${route.repeated_km} km`
-    : '<br>bez opakovani ulic';
+    ? `opakovani ulic: ${route.repeated_km} km`
+    : 'bez opakovani ulic';
+
+  // Merky, podle kterych se trasa vybrala - bez nich nejde posuvnik ladit
+  // ani poznat, co zmena delky/klidu udelala.
+  const major = route.along_major_km !== undefined
+    ? `podel rusnych ulic: ${route.along_major_km} km `
+      + `(${Math.round(route.along_major_share * 100)} %)`
+    : '';
+  const trail = route.trail_km !== undefined
+    ? `po znacenych trasach: ${route.trail_km} km `
+      + `(${Math.round(route.trail_share * 100)} %)`
+    : '';
+  const offBy = route.target_km !== undefined
+    ? Math.abs(route.length_km - route.target_km)
+    : null;
+  const length = offBy === null ? ''
+    : `delka: ${route.length_km} km (cil ${route.target_km}, odchylka `
+      + `${offBy < 0.05 ? 'presne na cili' : offBy.toFixed(1) + ' km'})`;
+
   routeBenefit.innerHTML = `<strong>Prinos trasy (score ${route.benefit.total})</strong><br>`
     + (parts.length ? parts.join('<br>') : 'Zadne zlepseni statistik')
     + `<br>stari navstev: +${route.benefit.staleness}`
-    + repeated;
+    + `<hr class="thin">${[length, major, trail, repeated].filter(Boolean).join('<br>')}`
+    + (route.score !== undefined ? `<br>vysledne skore: ${route.score}` : '');
   routeBenefit.hidden = false;
 }
 const routeLayerGroup = L.layerGroup().addTo(map);
@@ -491,7 +530,8 @@ async function planRoute() {
         lat: position.lat,
         lon: position.lng,
         distance_km: Number(routeDistance.value),
-        tolerance_km: Number(routeTolerance.value)
+        tolerance_km: Number(routeTolerance.value),
+        quiet_weight: Number(routeQuiet.value)
       })
     });
     const route = await response.json();
@@ -663,7 +703,8 @@ async function planExpedition() {
         tolerance_km: Number(routeTolerance.value),
         budget_min: Number(routeBudget.value),
         pace_min_per_km: Number(routePace.value),
-        weekend: routeWeekend.checked
+        weekend: routeWeekend.checked,
+        quiet_weight: Number(routeQuiet.value)
       })
     });
     const expedition = await response.json();
