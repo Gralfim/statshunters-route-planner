@@ -6,6 +6,11 @@ target_distance_km: 15
 distance_tolerance_km: 3
 run_pace_min_per_km: 6.0
 expedition_budget_min: 120
+mapy_cz:
+  # Podkladova turisticka mapa v UI (znacene trasy a cyklostezky). Klic zdarma
+  # na https://developer.mapy.com; lze zadat i pres promennou prostredi
+  # MAPY_CZ_API_KEY (ma prednost). Bez klice se pouzije OpenStreetMap.
+  api_key: "l6qkEmO6eFRkjExRdiLJ7pOpIzNCM1sovPARrSPUGAs"
 statshunters:
   # https://www.statshunters.com/share/<kod> nebo jen <kod>;
   # lze zadat i pres promennou prostredi STATSHUNTERS_SHARE_LINK

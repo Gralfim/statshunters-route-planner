@@ -58,6 +58,8 @@ target_distance_km: 15       # cílová délka trasy
 distance_tolerance_km: 3     # tolerance ±
 run_pace_min_per_km: 6.0     # tempo běhu (pro časový rozpočet výprav)
 expedition_budget_min: 120   # výchozí časový rozpočet celé výpravy
+mapy_cz:
+  api_key: ""                # turistický podklad v mapě; bez klíče se použije OSM
 statshunters:
   share_link: ""             # https://www.statshunters.com/share/<kod> nebo jen <kod>
 ```
@@ -87,9 +89,37 @@ resp. `/api/expedition`).
 | `src/transit.py` | síť MHD z PID GTFS + router spojení (min. přestupů, priorita druhů) |
 | `src/expedition.py` | výpravy: cílové oblasti, spojení tam/zpět, časový rozpočet |
 | `src/landmarks.py` | vodní toky a železnice (osmnx features) + geometrické křížení pro itinerář |
+| `src/basemap.py` | podkladová mapa v UI — Mapy.cz turistická vrstva (API klíč), fallback na OSM |
 | `src/geojson.py` | převod tiles na GeoJSON polygony |
 | `src/web/` | Leaflet frontend (mapa, přepínání vrstev, statistiky, legenda, sync tlačítko) |
 | `tests/` | pytest — čisté funkce, cenový model, itinerář; `-m slow` měří kvalitu na reálném grafu |
+
+### Podkladová mapa — Mapy.cz
+
+Výchozí podklad je **turistická mapa Mapy.cz** (mapset `outdoor`), protože kreslí
+**značené trasy a cyklotrasy** — tedy přesně to, podle čeho se trasa plánuje
+(`RUN_PREFERENCES`, atribut `trail`) a podle čeho se pak běží. Na OSM podkladu vidět
+nejsou, takže nešlo zkontrolovat, kudy naplánovaná trasa vlastně vede.
+
+Dlaždice jdou přes oficiální REST API Mapy.com, které vyžaduje **API klíč**:
+
+1. klíč zdarma na [developer.mapy.com](https://developer.mapy.com) (bezplatná kvóta
+   pokryje osobní použití s přehledem),
+2. vložit do `config.yaml` (`mapy_cz.api_key`) **nebo** nastavit `MAPY_CZ_API_KEY`
+   (má přednost — hodí se, když klíč nechcete mít v commitovaném configu).
+
+Bez klíče se nic nerozbije: `GET /api/basemap` vrátí `provider: "osm"` a mapa zůstane
+na OpenStreetMap.
+
+Přepínač podkladů je vlevo nahoře: **Turistická** (výchozí), Základní, Zimní a Letecká
+(letecká se automaticky doplní vrstvou názvů `names-overlay`, bez ní je k orientaci
+nepoužitelná). Retina dlaždice (`@2x`) API nabízí jen u `basic` a `outdoor`, jinde se
+berou standardní. Zobrazení **loga Mapy.com** je podmínka používání jejich API, ne
+dekorace — připíná a odepíná se spolu s jejich podkladem.
+
+Klíč konzumuje prohlížeč, takže se posílá do frontendu — u klientských map běžný model;
+na developer.mapy.com jde klíč omezit na konkrétní domény. Proxovat dlaždice přes backend
+by šlo, ale pro lokální nástroj je to jen latence navíc.
 
 ### Barvy na mapě
 
@@ -107,6 +137,7 @@ aby nepřekrývaly popupy tiles a doporučení.
 | Endpoint | Popis |
 |---|---|
 | `GET /api/health` | liveness check |
+| `GET /api/basemap` | konfigurace podkladové mapy (Mapy.cz klíč + atribuce, jinak OSM) |
 | `GET /api/summary` | počty aktivit, config, metriky pro všechna období |
 | `GET /api/periods/{period}/tiles` | navštívené tiles (GeoJSON); `period` = `all` \| `year` \| `recent` |
 | `GET /api/periods/{period}/frontier` | hraniční tiles |
@@ -273,6 +304,7 @@ pytest -m slow         # kontrolní měření na skutečném grafu Prahy (~1 min
 | `tests/test_cost_model.py` | pořadí preferencí typů cest + kontext: chodník podél rušné ulice prohrává s klidnou ulicí, značka je bonus, kontext hranu nikdy nezlevní |
 | `tests/test_itinerary.py` | kilometráž kroků i orientačních bodů, souběžná ulice není křížení, deduplikace napříč kroky, žádné „rovne" |
 | `tests/test_route_quality.py` | *(slow)* podíl délky podél významných ulic a klidných cest, dodržení tolerance, konzistence kilometráže na reálné trase |
+| `tests/test_basemap.py` | zdroj API klíče (env > config), fallback na OSM bez klíče, placeholdery v URL dlaždic |
 
 Rychlé testy běží nad **ručně postavenými grafy** (`line_graph` fixture v `conftest.py`) —
 délky hran se zadávají nezávisle na vzdálenosti uzlů, protože v OSM `length` kopíruje

@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from basemap import basemap_config
 from cluster import find_largest_cluster
 from expedition import build_targets, plan_expedition
 from landmarks import annotate_directions
@@ -139,6 +140,14 @@ def favicon():
 @app.get("/api/health")
 def health():
     return {"status":"ok"}
+
+
+@app.get("/api/basemap")
+def basemap():
+    """Konfigurace podkladove mapy. Vlastni endpoint (ne soucast /api/summary),
+    protoze summary staví tile databaze a pri prvnim dotazu trva sekundy -
+    podklad ma byt v mape hned."""
+    return basemap_config(get_config())
 
 
 @app.get("/api/summary")

@@ -1,9 +1,100 @@
 const map = L.map('map').setView([50.0755, 14.4378], 11);
 
-L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+// OSM se pripoji hned, at mapa neni prazdna; turisticky podklad z Mapy.cz se
+// dokresli, jakmile dorazi konfigurace (viz setupBasemap).
+const osmLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
-  attribution: '&copy; OpenStreetMap contributors'
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
 }).addTo(map);
+
+// Mapsety Mapy.cz. `outdoor` kresli turisticke znacky a cyklotrasy - tedy to,
+// podle ceho se trasa planuje; na OSM podkladu videt nejsou, proto je vychozi.
+// Retina dlazdice (@2x) nabizi API jen u basic a outdoor.
+const MAPY_MAPSETS = [
+  { key: 'outdoor', label: 'Turisticka (Mapy.cz)', retina: true },
+  { key: 'basic', label: 'Zakladni (Mapy.cz)', retina: true },
+  { key: 'winter', label: 'Zimni (Mapy.cz)', retina: false },
+  { key: 'aerial', label: 'Letecka (Mapy.cz)', retina: false }
+];
+
+function mapyTileLayer(config, mapset, retina, attribution) {
+  const tileSize = retina && L.Browser.retina ? '256@2x' : '256';
+  const url = config.tile_url
+    .replace('{mapset}', mapset)
+    .replace('{tile_size}', tileSize)
+    .replace('{api_key}', encodeURIComponent(config.api_key));
+  return L.tileLayer(url, { maxZoom: 19, attribution });
+}
+
+// Zobrazeni loga Mapy.com je podminka pouzivani jejich API, ne dekorace -
+// pripina se a odepina spolu s jejich podkladem.
+const mapyLogo = L.control({ position: 'bottomleft' });
+mapyLogo.onAdd = function () {
+  // leaflet-control je nutna: rohovy kontejner ma pointer-events:none, bez ni
+  // by povinny odkaz na Mapy.com nesel kliknout
+  const link = L.DomUtil.create('a', 'mapy-logo leaflet-control');
+  link.href = 'https://mapy.com/';
+  link.target = '_blank';
+  link.rel = 'noopener';
+  link.innerHTML = '<img src="https://api.mapy.cz/img/api/logo.svg" alt="Mapy.com">';
+  L.DomEvent.disableClickPropagation(link);
+  return link;
+};
+
+async function setupBasemap() {
+  let config;
+  try {
+    config = await fetch('/api/basemap').then(response => response.json());
+  } catch (error) {
+    return;  // podklad zustane na OSM
+  }
+  if (config.provider !== 'mapy.cz' || !config.api_key) return;
+
+  // Neplatny nebo vycerpany klic by jinak skoncil prazdnou mapou bez vysvetleni
+  // (API vraci 403). Par chyb muze byt vypadek site, proto az opakovane.
+  const baseLayers = {};
+  let tileErrors = 0;
+
+  function fallbackToOsm() {
+    if (map.hasLayer(osmLayer)) return;
+    console.warn('Dlazdice Mapy.cz se nedari nacist (neplatny klic nebo vycerpana kvota?)'
+      + ' - prepinam na OpenStreetMap.');
+    for (const layer of Object.values(baseLayers)) {
+      if (layer !== osmLayer) map.removeLayer(layer);
+    }
+    osmLayer.addTo(map);
+    mapyLogo.remove();
+  }
+
+  for (const mapset of MAPY_MAPSETS) {
+    const tiles = mapyTileLayer(config, mapset.key, mapset.retina, config.attribution);
+    tiles.on('tileerror', () => {
+      if (++tileErrors >= 6) fallbackToOsm();
+    });
+    // letecka bez popisu je k orientaci nepouzitelna - prilep na ni nazvy
+    baseLayers[mapset.label] = mapset.key === 'aerial'
+      ? L.layerGroup([tiles, mapyTileLayer(config, 'names-overlay', false, config.attribution)])
+      : tiles;
+  }
+  baseLayers['OpenStreetMap'] = osmLayer;
+
+  // nejdriv pripnout novy podklad, teprve pak odebrat stary - bez probliknuti
+  const tourist = baseLayers[MAPY_MAPSETS[0].label];
+  tourist.addTo(map);
+  map.removeLayer(osmLayer);
+  mapyLogo.addTo(map);
+
+  L.control.layers(baseLayers, null, { position: 'topleft' }).addTo(map);
+  map.on('baselayerchange', event => {
+    if (event.layer === osmLayer) {
+      mapyLogo.remove();
+    } else {
+      mapyLogo.addTo(map);
+    }
+  });
+}
+
+setupBasemap();
 
 // Poradi panes ridi, ktera vrstva dostane kliknuti: doporuceni lezi nad tiles,
 // obrysy cluster/square jsou jen dekorace (interactive: false).
