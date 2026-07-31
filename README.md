@@ -446,6 +446,7 @@ pytest -m slow         # kontrolní měření na skutečném grafu Prahy (~1 min
 | `tests/test_metro.py` | vrstva metra: sloučení nástupišť podle názvu, oba směry jako jeden úsek, přestupní stanice, barvy linek |
 | `tests/test_pois.py` | klasifikace OSM tagů do kategorií, odstupňování podle přiblížení, zahození bezejmenných restaurací, deduplikace |
 | `tests/test_static_cache.py` | statické soubory nesou `Cache-Control: no-cache` a zároveň validátory pro 304 |
+| `tests/test_expedition.py` | časové okno běhu (doběh a jízda ho zkracují, 24minutový strop na spojení), jednosměrný tvar dá širší okno, práh pro blízké cíle, odhad sklizně |
 | `tests/test_graph_cache.py` | cache připraveného grafu: zneplatnění při změně parametrů, round-trip, úklid starých otisků, odolnost proti poškozenému souboru |
 | `tests/test_objective.py` | cílová funkce: skóre nikdy nepřeroste přínos ani nespadne pod nulu, symetrie penalizace délky, váha klidu i značené trasy umí přehodit vítěze |
 
@@ -460,7 +461,24 @@ jejich smysl je zachytit regresi cenového modelu, ne zabetonovat konkrétní tr
 
 ## Výpravy s MHD
 
-Výprava = [běh na zastávku] → MHD → **běh** → MHD → [běh domů], s rozpočtem na celkový
+Výprava má dva tvary. **Jednosměrná** (běh na zastávku → MHD → **běh domů**) je výhodnější
+kdykoli se domů doběhnout dá: ušetří celou jednu jízdu a ten čas se přelije do běhu.
+Zpáteční jízda totiž nic nepřináší — jen se platí. Naměřeno z Karlova nám. při 15 ± 3 km
+a 120 min:
+
+| tvar | přínos | běh | čas |
+|---|---|---|---|
+| čistý okruh bez MHD | 112,5 | 14,93 km | 89,6 min *(30 min nevyužito)* |
+| MHD tam i zpět (okruh u cíle) | 124,8 | 12,64 km | 111,7 min |
+| **jednosměrná: metro A na Motol, běh domů** | **307,7** | 16,49 km | 118,1 min |
+
+Okruh se zpáteční jízdou se počítá až jako náhrada pro cíle, ze kterých se domů doběhnout
+nedá (`ONEWAY_HOME_SHARE`) — plánovat oba tvary pro každého kandidáta by dobu plánování
+zdvojnásobilo. Jednosměrný tvar navíc obejde i 24minutový strop na spojení: platí se
+jen jednou, takže projdou i cíle, na které okruh nemá čas (Zbuzany dřív „nevejde se do
+rozpočtu", jednosměrně přínos 307,4).
+
+Původní tvar = [běh na zastávku] → MHD → **běh** → MHD → [běh domů], s rozpočtem na celkový
 čas (`expedition_budget_min`, výchozí 120 min). Pěší přesuny se plánují po stejném pěším
 grafu jako běhy a počítají se do kilometrů běhu; čas běhu se odhaduje tempem
 `run_pace_min_per_km`. Návrat může vést **z jiné zastávky** než výstup — běh pak cílovou
@@ -491,8 +509,25 @@ v panelu; čistý okruh bez MHD je vždy jednou z porovnávaných variant.
 3. **Cílové oblasti**: lokální skupiny sousedících kandidátů (velké souvislé fronty se
    dělí mřížkou) **plus okna na dokompletování max square** (globální scan přes
    integrální obraz — chybějící tiles okna bývají rozptýlené a skupinové cíle by je
-   nezachytily). Oblasti se řadí podle společného přínosu; předfiltr dosažitelnosti
-   vyřadí ty, ke kterým se v rozpočtu nedá dojet. Pro top oblasti se najde spojení
+   nezachytily). Předfiltr dosažitelnosti vyřadí ty, ke kterým se v rozpočtu nedá dojet.
+
+   **Blízké oblasti se z MHD nevyřazují** (`MIN_TRANSIT_TARGET_SHARE`). Dřív platilo
+   „bližší než polovina doběhu → tam si doběhneš sám", což byla chybná úvaha: doběhnout
+   k oblasti 6 km daleko a zpět spotřebuje 12 z 15 km rozpočtu a na sbírání v oblasti
+   nezbude nic. Naměřeno z Karlova nám.: Strašnická (5,5 km), Skalka (6,3 km) i Depo
+   Hostivař (7,4 km) ležely pod starým prahem 8,1 km, přitom metrem A jsou za 9–16 minut
+   a celá výprava vyjde na 105–112 minut ze 120. Po uvolnění prahu vzrostl počet
+   použitelných kandidátů z **1 na 4** a vítězem se stala výprava metrem A na Zahradní
+   Město (přínos 124,8 proti 112,5 čistého okruhu).
+
+   Kandidáti se řadí podle **odhadu sklizně** (`_harvest_estimate`) — kolik přínosu
+   posbírá okruh dané délky z místa výstupu — místo podle přínosu celé cílové oblasti.
+   Ten byl zavádějící v obou směrech: velká oblast má vysoký součet, ale běh z ní stihne
+   jen kousek (Zbuzany: odhad oblasti 1 229, skutečná trasa nic), kdežto blízká oblast má
+   součet malý, i když by z ní běh nasbíral dost. **Pozor, odhad není zkalibrovaný**:
+   proti třem skutečným trasám cíle MHD nadhodnocuje (Motol 299 → 6,3) a u vítězné
+   varianty naopak podstřelil (94 → 124,8). Slouží jen k hrubému seřazení a proto se
+   exaktně plánuje **5** kandidátů, ne 3 — kandidáti s už staženým grafem jsou levní. Pro top oblasti se najde spojení
    na zastávku v doběhu oblasti a spočte časové okno pro okruh (zpáteční spojení se
    uvažuje symetrické).
 4. **Exaktní plán** se počítá pro čistý okruh + nejlepší až 3 MHD kandidáty (přednost mají
@@ -541,19 +576,26 @@ v cenách hran a čtyři vady itineráře (viz „Plánování tras", body 5 a 6
    opakování 0–1 % (Karlovo nám. i Zahradní Město), takže současná metrika ten jev
    nezachytí. Chtělo by to měřit blízkost trasy k sobě samé (např. podíl délky, která
    vede do X metrů od dřívějšího úseku), a teprve to dát do cílové funkce.
-3. **Itinerář na rozhodovacích bodech.** Dnes vzniká řádek na každou změnu názvu cesty —
+3. **Nabídnout několik dobrých variant, ne jen nejlepší.** Uživatel si chce vybírat podle
+   chuti a počasí („v horku raději podél vody a ve stínu"). Portfolio variant v
+   `routeplan` už existuje — dnes se z něj jen vezme maximum a zbytek zahodí. Vracet
+   top-N *různých* variant (ne drobné obměny téže trasy) s popisem, čím se liší
+   (podíl podél vody, ve stínu, po značkách, délka, přínos), a nechat volbu na uživateli.
+   Vyžaduje: míru odlišnosti tras, aby se nenabízely tři skoro stejné, a měrku stínu
+   (`natural=wood`, `landuse=forest`) a vody, které zatím nemáme.
+4. **Itinerář na rozhodovacích bodech.** Dnes vzniká řádek na každou změnu názvu cesty —
    běžec potřebuje řádek tam, kde se dá zabloudit, plus průběžné potvrzovací záchytné body.
    Na referenční trase je ~109 ostrých odboček na křižovatkách proti 21 pokynům; slučování
    krátkých úseků (`STEP_MIN_M`) navíc rozhodovací body maže. Přidat odstupňování odbočky
    („mírně/ostře" — dnes je 35–150° všechno stejné „vlevo") a čas úseku podle tempa.
-4. **Dlaždice v itineráři.** `directions` o cílových dlaždicích neobsahují nic, ačkoli
+5. **Dlaždice v itineráři.** `directions` o cílových dlaždicích neobsahují nic, ačkoli
    `waypoint_tiles` v odpovědi je. Označit kroky, kde trasa sbírá cílovou dlaždici, včetně
    pokynu, jak hluboko dovnitř — bez toho itinerář ignoruje účel celé aplikace.
-5. **Popisky, které nelžou.** Nepojmenovaný chodník dědí název souběžné ulice do 40 m, takže
+6. **Popisky, které nelžou.** Nepojmenovaný chodník dědí název souběžné ulice do 40 m, takže
    „Bělehradská" může být pěšina v parku vedle ní; `_vote_step_name` pojmenuje krok ulicí
    pokrývající jen 40 % délky; `absorb` neaktualizuje `named`/`kind`, takže se pohlcený úsek
    může vydávat za jiný typ cesty (a `kind` řídí hlášení rozcestí).
-6. ~~Rozdělit `src/routing.py` a přidat cache připraveného grafu.~~ **Hotovo (07/2026):**
+7. ~~Rozdělit `src/routing.py` a přidat cache připraveného grafu.~~ **Hotovo (07/2026):**
    1 254řádkový `routing.py` je rozdělený na `geo` / `runcost` / `waygraph` / `routeplan` /
    `itinerary` (viz tabulka struktury) a připravený graf se cachuje do pickle. Ověřeno
    head-to-head proti verzi před refaktorem na témž grafu a týchž datech: shodná délka,

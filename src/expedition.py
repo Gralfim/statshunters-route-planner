@@ -24,11 +24,31 @@ RETURN_COST_SLACK = 15.0        # navrat smi byt o tolik "drazsi", kdyz umozni p
 MAX_TARGETS = 20                # strop CASOVE SPLNITELNYCH kandidatu
 MAX_TARGET_CHECKS = 40          # strop dotazu na spojeni (nesplnitelne cile sloty nespotrebuji)
 TRANSIT_SPEED_KMH = 40          # hruby horni odhad rychlosti MHD vc. cekani (pro predfiltr)
-MAX_EXACT_TRANSIT_PLANS = 3
+# Kolik kandidatu se doopravdy naplanuje. Odhad sklizne (_harvest_estimate) je
+# jen hrube razeni - mereno proti trem skutecnym trasam nadhodnocuje cile MHD
+# nekolikanasobne, takze spolehat na prvni tri by dobre kandidaty ustrihlo.
+# Kandidati s uz stazenym grafem jsou levni (bez cekani na Overpass) a po
+# uvolneni predfiltru jich vetsinou par je, takze se jich vyplati projit vic.
+MAX_EXACT_TRANSIT_PLANS = 5
 MIN_LOOP_KM = 3.0
 MIN_TARGET_BENEFIT = 20.0
 MAX_TARGET_SPAN_TILES = 6       # vetsi skupiny nejsou cil jednoho behu - deli se
 TARGET_CELL_TILES = 4           # mrizka deleni (~6 km)
+# Jak daleko musi cil byt, aby melo smysl uvazovat MHD - podil cilove delky behu.
+# Drive se vyrazovalo vsechno blizsi nez polovina dosahu behu s oduvodnenim
+# "tam si doberhnes sam". To je ale spatna uvaha: dobehnout k oblasti 6 km daleko
+# a zpatky spotrebuje 12 z 15 km rozpoctu a na sbirani v oblasti nezbyde nic.
+# Mereno z Karlova nam.: Strasnicka (5,5 km), Skalka (6,3 km) i Depo Hostivar
+# (7,4 km) lezely pod starym prahem 8,1 km, pritom metrem A jsou za 9-16 minut
+# a cela vyprava vyjde na 105-112 minut ze 120. Ted se vyrazuje jen to, co je tak
+# blizko, ze cesta na zastavku stoji vic, nez usetri.
+MIN_TRANSIT_TARGET_SHARE = 0.2
+# Odhad, kolik dlazdic trasa dane delky protne (mereno na referencnich okruzich).
+TILES_PER_KM = 0.7
+# Jednosmerna vyprava (MHD tam, beh domu) ma smysl, jen kdyz je domov v dosahu
+# delkoveho okna. Podil, ne cela delka: trasa musi mit rezervu na zajizdky za
+# dlazdicemi, jinak by byla jen prima spojnicí domu.
+ONEWAY_HOME_SHARE = 0.75
 
 
 def _split_group(group):
@@ -194,8 +214,42 @@ def _home_walk_costs(network, start_lat, start_lon, stop_ids, pace):
     return costs
 
 
+def _opportunity_points(opportunities):
+    """(lat, lon, skore, tile) pro kazdou prilezitost - pocita se jednou."""
+    points = []
+    for item in opportunities:
+        tile = tuple(item["tile"])
+        lat, lon = tile_center(tile)
+        points.append((lat, lon, item["score"], tile))
+    return points
+
+
+def _harvest_estimate(lat, lon, loop_km, points, context):
+    """Odhad prinosu, ktery beh dane delky z tohoto bodu posbira.
+
+    Nahrazuje razeni podle prinosu CELE cilove oblasti. Ten byl zavadejici ve
+    dvou smerech: velka oblast ma vysoky soucet, ale beh z ni stihne jen kousek
+    (Zbuzany: odhad oblasti 1229, skutecna trasa nic), kdezto blizka oblast ma
+    soucet maly, i kdyz by z ni beh nasbiral dost.
+
+    Bere nejlepsi dlazdice v dosahu okruhu a ohodnoti je JAKO MNOZINU
+    (evaluate_tile_set) - zisky square/cluster nejsou aditivni, takze soucet
+    jednotlivych skore by poradi opet zkreslil.
+    """
+    reach_m = loop_km * 1000 / 2 * 0.9
+    near = [
+        (score, tile) for plat, plon, score, tile in points
+        if haversine_m(lat, lon, plat, plon) <= reach_m
+    ]
+    if not near:
+        return 0.0
+    near.sort(reverse=True)
+    take = max(1, int(loop_km * TILES_PER_KM))
+    return evaluate_tile_set({tile for _score, tile in near[:take]}, context)["total"]
+
+
 def _transit_candidates(start_lat, start_lon, target_km, tolerance_km, budget_min, pace,
-                        network, targets, origin_ids, day):
+                        network, targets, origin_ids, day, opportunities, context):
     # predfiltr dosazitelnosti: cile, ke kterym se pri nejkratsim pripustnem behu
     # vubec da dojet a vratit se v rozpoctu (hruby odhad rychlosti MHD)
     min_run_min = max(target_km - tolerance_km, MIN_LOOP_KM) * pace
@@ -204,11 +258,20 @@ def _transit_candidates(start_lat, start_lon, target_km, tolerance_km, budget_mi
         return []
     max_target_m = (transit_budget_min / 60 * TRANSIT_SPEED_KMH + (target_km + tolerance_km) / 2) * 1000
 
-    direct_reach_m = (target_km + tolerance_km) * 1000 / 2 * 0.9
+    direct_reach_m = target_km * 1000 * MIN_TRANSIT_TARGET_SHARE
     eligible = [
         target for target in targets
         if direct_reach_m < haversine_m(start_lat, start_lon, target["lat"], target["lon"]) <= max_target_m
     ]
+
+    # Poradi rozhoduje, co se vejde do MAX_TARGET_CHECKS dotazu na spojeni -
+    # radime proto podle odhadu SKLIZNE, ne podle prinosu cele oblasti.
+    points = _opportunity_points(opportunities)
+    for target in eligible:
+        target["harvest"] = _harvest_estimate(
+            target["lat"], target["lon"], target_km, points, context
+        )
+    eligible.sort(key=lambda target: -target["harvest"])
 
     candidates = []
     seen_stops = set()
@@ -253,9 +316,12 @@ def _transit_candidates(start_lat, start_lon, target_km, tolerance_km, budget_mi
             "walk_km": round(walk_km, 2),
             "loop_target": window[0],
             "loop_tolerance": window[1],
+            # ted uz je zname misto vystupu i skutecna delka okruhu, takze se
+            # sklizen prepocita presneji nez u stredu cilove oblasti
+            "harvest": _harvest_estimate(alight[1], alight[2], window[0], points, context),
         })
 
-    candidates.sort(key=lambda item: -item["target"]["benefit"])
+    candidates.sort(key=lambda item: -item["harvest"])
     return candidates
 
 
@@ -322,6 +388,71 @@ def _return_options(network, candidate, origin_ids, day, home_costs):
         }
         for stop_id, connection in ordered
     ]
+
+
+def _plan_oneway_expedition(candidate, start_lat, start_lon, pace, budget_min,
+                            opportunities, context, quiet_weight=None):
+    """MHD tam, beh domu - bez zpatecni jizdy.
+
+    Vyhodnejsi tvar vypravy, kdykoli se domu doběhnout da: usetri celou jednu
+    cestu MHD a ten cas se prelije do behu, takze se v cilove oblasti stihne
+    vic. Mereno z Karlova nam. na Sidliste Zahradni Mesto: okruh se zpatecni
+    jizdou dal 10,8 km behu a 16 minut cekani a jizdy navic, pritom beh koncil
+    7 km od domova.
+
+    Delkove okno se pocita jen s jednou jizdou a jednim dobehem na zastavku,
+    takze vyjde vyrazne sirsi nez u okruhu.
+    """
+    board = candidate["board"]
+    alight = candidate["alight"]
+    conn_out = candidate["connection"]
+
+    home_graph = load_walk_graph(start_lat, start_lon, HOME_WALK_REACH_KM)
+    walk_out = plan_walk(home_graph, start_lat, start_lon, board["lat"], board["lon"])
+
+    window = _loop_window(
+        candidate["target_km"], candidate["tolerance_km"], walk_out["km"],
+        budget_min, conn_out["minutes"], pace,
+    )
+    if window is None:
+        raise RuntimeError("One-way expedition does not fit the time budget")
+    run_target, run_tolerance = window
+
+    # Domu se musi dat dobehnout v ramci delkoveho okna - jinak je jednosmerny
+    # tvar nesmysl a musi se vracet MHD.
+    home_km = haversine_m(alight["lat"], alight["lon"], start_lat, start_lon) / 1000
+    if home_km > (run_target + run_tolerance) * ONEWAY_HOME_SHARE:
+        raise RuntimeError("Too far to run home")
+
+    reach_km = (run_target + run_tolerance) / 2 + home_km / 2 + 0.5
+    graph = load_walk_graph(
+        (alight["lat"] + start_lat) / 2, (alight["lon"] + start_lon) / 2, reach_km
+    )
+    route = plan_tile_loop(
+        graph, alight["lat"], alight["lon"], run_target, run_tolerance,
+        opportunities, context, end_lat=start_lat, end_lon=start_lon,
+        quiet_weight=quiet_weight,
+    )
+
+    run_km = round(route["length_km"] + walk_out["km"], 2)
+    total_min = round(run_km * pace + conn_out["minutes"], 1)
+
+    return {
+        "kind": "transit",
+        "benefit": route["benefit"],
+        "run_km": run_km,
+        "total_min": total_min,
+        "within_budget": bool(total_min <= budget_min),
+        "board": board,
+        "alight": alight,
+        "return_stop": None,  # domu se bezi, zpatecni jizda neni
+        "segments": [
+            _walk_segment(walk_out, pace, f"Behem na zastavku {board['name']}"),
+            _transit_segment(conn_out, f"{board['name']} -> {alight['name']}"),
+            _run_segment(route, pace),
+        ],
+        "route": route,
+    }
 
 
 def _plan_transit_expedition(candidate, start_lat, start_lon, pace, budget_min,
@@ -402,7 +533,7 @@ def plan_expedition(start_lat, start_lon, target_km, tolerance_km, budget_min, p
     if origin_ids:
         candidates = _transit_candidates(
             start_lat, start_lon, target_km, tolerance_km, budget_min, pace,
-            network, targets, origin_ids, day,
+            network, targets, origin_ids, day, opportunities, context,
         )
 
     # exaktne planuj: kandidaty s uz stazenym grafem maji prednost (bez cekani)
@@ -410,7 +541,7 @@ def plan_expedition(start_lat, start_lon, target_km, tolerance_km, budget_min, p
         reach = (candidate["loop_target"] + candidate["loop_tolerance"]) / 2 + 0.5
         return covering_graph_path(candidate["alight"]["lat"], candidate["alight"]["lon"], reach) is not None
 
-    ordered = sorted(candidates, key=lambda c: (not has_cached_graph(c), -c["target"]["benefit"]))
+    ordered = sorted(candidates, key=lambda c: (not has_cached_graph(c), -c["harvest"]))
 
     plans = []
     pure = _plan_pure_loop(
@@ -420,7 +551,20 @@ def plan_expedition(start_lat, start_lon, target_km, tolerance_km, budget_min, p
     if pure:
         plans.append(pure)
 
+    # Nejdriv jednosmerny tvar (MHD tam, beh domu) - kdykoli se domu dobehnout
+    # da, je vyhodnejsi: usetri celou jednu jizdu a ten cas se prelije do behu.
+    # Okruh se zpatecni jizdou se pocita az jako nahrada pro cile, ze kterych se
+    # domu dobehnout neda. Planovat oba tvary pro kazdeho kandidata by dobu
+    # planovani zdvojnasobilo.
     for candidate in ordered[:MAX_EXACT_TRANSIT_PLANS]:
+        try:
+            plans.append(_plan_oneway_expedition(
+                candidate, start_lat, start_lon, pace, budget_min,
+                opportunities, context, quiet_weight=quiet_weight,
+            ))
+            continue
+        except RuntimeError:
+            pass
         try:
             plans.append(_plan_transit_expedition(
                 candidate, start_lat, start_lon, pace, budget_min,
@@ -440,7 +584,7 @@ def plan_expedition(start_lat, start_lon, target_km, tolerance_km, budget_min, p
             "alight": candidate["alight"]["name"],
             "transit_min": candidate["connection"]["minutes"],
             "transfers": candidate["connection"]["transfers"],
-            "benefit_estimate": candidate["target"]["benefit"],
+            "benefit_estimate": round(candidate["harvest"], 1),
             "lines": [leg["line"] for leg in candidate["connection"]["legs"]],
         }
         for candidate in candidates[:6]
