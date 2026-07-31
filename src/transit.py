@@ -205,6 +205,59 @@ def load_transit_graph():
     return build_transit_graph()
 
 
+# Barvy prazskeho metra - v mape maji byt ty, ktere ma clovek spojene s linkou,
+# ne nase paleta obdobi.
+METRO_COLORS = {"A": "#0aa04b", "B": "#f0ab00", "C": "#d9232e"}
+
+
+def metro_geometry(graph):
+    """Trasy metra a stanice pro podklad v mape.
+
+    Turisticka vrstva Mapy.cz metro nekresli, ale sit PID uz mame nactenou kvuli
+    vypravam - staci ji prevest na linie. Kazda stanice ma v GTFS vic uzlu
+    (nastupiste pro kazdy smer), takze se stanice slucuji podle NAZVU; jinak by
+    kazda linka vysla jako dve rovnobezky par metru od sebe.
+    """
+    stops = graph["stops"]
+    edges = [edge for edge in graph["edges"] if edge[4] == "metro"]
+
+    positions = defaultdict(list)
+    lines_at = defaultdict(set)
+    for from_id, to_id, _minutes, line, _mode, _run in edges:
+        for stop_id in (from_id, to_id):
+            name, lat, lon = stops[stop_id]
+            positions[name].append((lat, lon))
+            lines_at[name].add(line)
+
+    station = {
+        name: (round(sum(p[0] for p in points) / len(points), 6),
+               round(sum(p[1] for p in points) / len(points), 6))
+        for name, points in positions.items()
+    }
+
+    segments = defaultdict(set)
+    for from_id, to_id, _minutes, line, _mode, _run in edges:
+        a, b = stops[from_id][0], stops[to_id][0]
+        if a != b:  # oba smery daji tentyz usek
+            segments[line].add((a, b) if a <= b else (b, a))
+
+    return {
+        "lines": [
+            {
+                "line": line,
+                "color": METRO_COLORS.get(line, "#53606f"),
+                "segments": [[station[a], station[b]] for a, b in sorted(pairs)],
+            }
+            for line, pairs in sorted(segments.items())
+        ],
+        "stations": [
+            {"name": name, "lat": station[name][0], "lon": station[name][1],
+             "lines": sorted(lines_at[name])}
+            for name in sorted(station)
+        ],
+    }
+
+
 class TransitNetwork:
     def __init__(self, graph):
         self.stops = graph["stops"]

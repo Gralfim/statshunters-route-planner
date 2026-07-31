@@ -21,7 +21,7 @@ from scoring import build_route_context, find_tile_opportunities
 from square import find_largest_square
 from statshunters import resolve_share_link, sync_activities
 from tiles import build_tile_database
-from transit import TransitNetwork, load_transit_graph
+from transit import TransitNetwork, load_transit_graph, metro_geometry
 from waygraph import load_walk_graph
 
 
@@ -29,8 +29,28 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
 CONFIG_PATH = ROOT / "config.yaml"
 WEB_DIR = Path(__file__).resolve().parent / "web"
+MIN_POI_REACH_KM = 10  # stahuje se velkoryse, at se cache pouzije i pro okolni starty
 
 app = FastAPI(title="StatsHunters Route Planner")
+
+
+class FreshStaticFiles(StaticFiles):
+    """Staticke soubory se musi pred pouzitim vzdy overit u serveru.
+
+    Bez hlavicky Cache-Control si prohlizec podle HTTP heuristiky (RFC 9111,
+    4.2.2) urci dobu platnosti sam - typicky z desetiny stari souboru podle
+    Last-Modified. U app.js, ktery se meni casto, to znamena, ze novou verzi
+    nemusi vubec vyzadat: neposle ani dotaz, natoz aby dostal 304. Restart
+    serveru s tim nic neudela, protoze se ho prohlizec neptá.
+
+    `no-cache` NEznamena "necachuj", ale "pred pouzitim se zeptej" - odpoved
+    304 Not Modified funguje dal, takze se telo souboru neprenasi zbytecne.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers.setdefault("cache-control", "no-cache")
+        return response
 
 
 @app.exception_handler(Exception)
@@ -248,6 +268,30 @@ def get_expedition_targets():
     return build_targets(get_opportunities(), get_route_context())
 
 
+@lru_cache
+def get_metro_geometry():
+    return metro_geometry(load_transit_graph())
+
+
+@app.get("/api/pois")
+def pois(lat: float | None = None, lon: float | None = None):
+    """Orientacni body a obcerstveni kolem zadaneho bodu (vychozi domov).
+    Prvni dotaz pro novou oblast stahuje z Overpass a trva desitky sekund."""
+    from pois import load_pois
+
+    config = get_config()
+    lat = lat if lat is not None else config["home"]["lat"]
+    lon = lon if lon is not None else config["home"]["lon"]
+    return {"points": load_pois(lat, lon, MIN_POI_REACH_KM)}
+
+
+@app.get("/api/transit/metro")
+def metro():
+    """Trasy metra a stanice - turisticka vrstva Mapy.cz je nekresli a bez nich
+    se v mape spatne orientuje."""
+    return get_metro_geometry()
+
+
 @app.get("/api/opportunities")
 def opportunities_geojson():
     return feature_collection(
@@ -424,4 +468,4 @@ def all_square_geojson():
     return square_geojson("all")
 
 
-app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
+app.mount("/", FreshStaticFiles(directory=WEB_DIR, html=True), name="web")

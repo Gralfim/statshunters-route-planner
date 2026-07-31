@@ -98,7 +98,11 @@ setupBasemap();
 
 // Poradi panes ridi, ktera vrstva dostane kliknuti: doporuceni lezi nad tiles,
 // obrysy cluster/square jsou jen dekorace (interactive: false).
-const PANES = { tiles: 410, opportunities: 420, cluster: 430, square: 440, route: 450 };
+// metro lezi pod dlazdicemi: je to orientacni podklad, nema prekryvat data
+const PANES = {
+  metro: 405, tiles: 410, opportunities: 420, cluster: 430, square: 440,
+  route: 450, poi: 460  // body nahore, at jdou najet mysi
+};
 for (const [name, zIndex] of Object.entries(PANES)) {
   map.createPane(`${name}Pane`).style.zIndex = zIndex;
 }
@@ -107,10 +111,12 @@ const OPPORTUNITY_COLOR = '#4a3aa7';
 
 const periodOrder = ['all', 'year', 'recent'];
 const overlayGroups = {
+  metro: L.layerGroup().addTo(map),
   tiles: L.layerGroup().addTo(map),
   opportunities: L.layerGroup().addTo(map),
   cluster: L.layerGroup().addTo(map),
-  square: L.layerGroup().addTo(map)
+  square: L.layerGroup().addTo(map),
+  pois: L.layerGroup().addTo(map)
 };
 const layerCache = {};
 let periods = [];
@@ -208,6 +214,106 @@ async function loadOpportunityLayer() {
   return layerCache.opportunities;
 }
 
+// Metro jako orientacni podklad: turisticka mapa Mapy.cz ho nekresli a bez nej
+// se v mape spatne hleda. Data uz mame ze site PID (kvuli vypravam).
+async function loadMetroLayer() {
+  if (layerCache.metro) return layerCache.metro;
+
+  const data = await fetch('/api/transit/metro').then(r => r.json());
+  const group = L.layerGroup();
+
+  for (const line of data.lines) {
+    for (const segment of line.segments) {
+      // bila podkresba, aby linka drzela i na barevne turisticke mape
+      group.addLayer(L.polyline(segment, {
+        pane: 'metroPane', color: '#ffffff', weight: 7, opacity: 0.55, interactive: false
+      }));
+      group.addLayer(L.polyline(segment, {
+        pane: 'metroPane', color: line.color, weight: 3.5, opacity: 0.9, interactive: false
+      }));
+    }
+  }
+
+  for (const station of data.stations) {
+    const colors = station.lines.map(name => (data.lines.find(l => l.line === name) || {}).color);
+    group.addLayer(L.circleMarker([station.lat, station.lon], {
+      pane: 'metroPane',
+      radius: station.lines.length > 1 ? 5 : 4,
+      color: '#111827',
+      weight: 1.5,
+      // prestupni stanice bile, jinak barva sve linky
+      fillColor: station.lines.length > 1 ? '#ffffff' : (colors[0] || '#53606f'),
+      fillOpacity: 1
+    }).bindTooltip(`${station.name} (${station.lines.join('+')})`));
+  }
+
+  layerCache.metro = group;
+  return group;
+}
+
+// Orientacni body a obcerstveni. Mapy.cz je v dlazdicich nekresli a jejich API
+// je nema, takze pochazeji z OSM. Postupne objevovani podle dulezitosti (jako
+// v aplikaci Mapy.cz) delame sami: kazdy bod nese min_zoom a pri oddaleni se
+// schova - jinak by Praha byla jedna kupa ikon.
+let poiPoints = null;
+
+function poiMarker(point) {
+  return L.marker([point.lat, point.lon], {
+    pane: 'poiPane',
+    icon: L.divIcon({
+      className: 'poi-icon',
+      html: `<span title="${point.label}">${point.icon}</span>`,
+      iconSize: [18, 18],
+      iconAnchor: [9, 9]
+    })
+  }).bindTooltip(`${point.name} (${point.label})`);
+}
+
+function renderPois() {
+  const group = overlayGroups.pois;
+  const hint = document.querySelector('#poi-hint');
+  group.clearLayers();
+  if (!poiPoints) return;
+
+  const zoom = map.getZoom();
+  const bounds = map.getBounds().pad(0.2);
+  const shown = {};
+  let hidden = 0;
+
+  for (const point of poiPoints) {
+    if (!bounds.contains([point.lat, point.lon])) continue;
+    if (point.min_zoom > zoom) {
+      hidden += 1;
+      continue;
+    }
+    shown[point.label] = (shown[point.label] || 0) + 1;
+    group.addLayer(poiMarker(point));
+  }
+
+  // Bez tohoto vypisu neni poznat, ze se cast bodu skryva podle priblizeni -
+  // uzivatel jen vidi, ze restaurace "nikde nejsou".
+  if (!hint) return;
+  const parts = Object.entries(shown).sort((a, b) => b[1] - a[1])
+    .map(([label, count]) => `${count} ${label}`);
+  hint.textContent = parts.length
+    ? parts.join(', ') + (hidden ? ` · ${hidden} dalsich az po priblizeni` : '')
+    : (hidden ? `${hidden} bodu se zobrazi az po priblizeni` : 'v tomto vyrezu nic');
+}
+
+async function loadPoiLayer() {
+  if (!poiPoints) {
+    const data = await fetch('/api/pois').then(r => r.json());
+    poiPoints = data.points || [];
+  }
+  renderPois();
+}
+
+// prekresluje se pri pohybu mapy, ale jen kdyz je vrstva zapnuta
+map.on('moveend zoomend', () => {
+  const input = document.querySelector('[data-overlay="pois"]');
+  if (input && input.checked) renderPois();
+});
+
 async function loadOutlineLayer(periodKey, overlay) {
   const cacheKey = `${periodKey}:${overlay}`;
   if (layerCache[cacheKey]) return layerCache[cacheKey];
@@ -239,6 +345,16 @@ async function drawOverlay(overlay) {
 
   if (overlay === 'opportunities') {
     overlayGroups.opportunities.addLayer(await loadOpportunityLayer());
+    return;
+  }
+
+  if (overlay === 'metro') {
+    overlayGroups.metro.addLayer(await loadMetroLayer());
+    return;
+  }
+
+  if (overlay === 'pois') {
+    await loadPoiLayer();
     return;
   }
 

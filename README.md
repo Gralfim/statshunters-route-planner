@@ -26,6 +26,15 @@ python src/main.py --reload
 Pozor: bez `--reload` platí, že statické soubory (`src/web/`) se čtou z disku vždy čerstvé,
 ale python kód drží server z doby svého startu — po změně backendu je potřeba restart.
 
+**Cache prohlížeče.** Statické soubory se servírují s `Cache-Control: no-cache`
+(`FreshStaticFiles` v `src/api.py`). Bez té hlavičky si prohlížeč podle HTTP heuristiky
+(RFC 9111, 4.2.2) určí platnost sám — typicky z desetiny stáří souboru podle
+`Last-Modified` — a novou verzi `app.js` si nemusí vyžádat **vůbec**; restart serveru s tím
+nic neudělá, protože se ho prohlížeč neptá. Změny ve frontendu se pak tváří, jako by se
+„nezveřejnily". `no-cache` neznamená „neukládej", ale „před použitím se zeptej", takže
+`304 Not Modified` funguje dál a tělo souboru se zbytečně nepřenáší. Když se přesto zdá,
+že UI drží starou verzi, pomůže jednorázově tvrdý reload (Ctrl+F5).
+
 Spouštět z kořene repozitáře. Frontend běží přímo na kořenové URL (`/`), API pod `/api/...`.
 
 ### Prostředí
@@ -95,6 +104,7 @@ resp. `/api/expedition`).
 | `src/expedition.py` | výpravy: cílové oblasti, spojení tam/zpět, časový rozpočet |
 | `src/landmarks.py` | vodní toky a železnice (osmnx features) + geometrické křížení pro itinerář |
 | `src/basemap.py` | podkladová mapa v UI — Mapy.cz turistická vrstva (API klíč), fallback na OSM |
+| `src/pois.py` | orientační body a občerstvení z OSM (vyhlídky, studánky, pitná voda, restaurace) s odstupňováním podle přiblížení |
 | `src/geojson.py` | převod tiles na GeoJSON polygony |
 | `src/web/` | Leaflet frontend (mapa, přepínání vrstev, statistiky, legenda, sync tlačítko) |
 | `tests/` | pytest — čisté funkce, cenový model, itinerář; `-m slow` měří kvalitu na reálném grafu |
@@ -126,6 +136,58 @@ Klíč konzumuje prohlížeč, takže se posílá do frontendu — u klientskýc
 na developer.mapy.com jde klíč omezit na konkrétní domény. Proxovat dlaždice přes backend
 by šlo, ale pro lokální nástroj je to jen latence navíc.
 
+**Metro jako vlastní vrstva.** Turistická mapa Mapy.cz trasy metra nekreslí a bez nich se
+v mapě špatně orientuje. Data ale už máme — síť PID se načítá kvůli výpravám — takže se
+z ní jen postaví linie (`metro_geometry`, `GET /api/transit/metro`, přepínač **Metro**
+v panelu). Barvy jsou ty skutečné (A zelená, B žlutá, C červená), přestupní stanice bílé.
+Každá stanice má v GTFS uzel pro každé nástupiště, proto se slučují **podle názvu** —
+jinak by každá linka vyšla jako dvě rovnoběžky pár metrů od sebe. Vrstva leží pod
+dlaždicemi: je to orientační podklad, nemá překrývat data.
+
+**Orientační body a občerstvení taky vlastní vrstvou.** Mapy.cz je v dlaždicích nekreslí
+a jejich API je nemá: `/v1/poi`, `/v1/places`, `/v1/pois` i `/v1/search` vrací **404** a
+dokumentované funkce jsou jen dlaždice, geokódování, routing, výšky, statické obrázky a
+časová pásma (ověřeno 07/2026; navíc stažená dlaždice z18 nad Karlovým náměstím ukazuje
+popisky budov, ale žádné ikony amenit). Postupné objevování podle důležitosti, které má
+jejich aplikace, je vlastnost jejich vektorových dlaždic — z veřejného API se získat nedá.
+
+Zdrojem je proto **OSM přes Overpass** (`src/pois.py`, `GET /api/pois`, přepínač
+**Orientacni body a obcerstveni**), s coverage cache jako u grafu. Odstupňování se dělá
+samo: každý bod dostane `min_zoom` podle kategorie a významnosti (odkaz na
+Wikipedii/Wikidata ho posune o jedno přiblížení dřív) a vrstva ukazuje jen to, co se do
+daného zoomu hodí — jinak by Praha byla jedna kupa ikon. Naměřeno pro 10 km kolem Karlova
+nám.: **5 643 bodů staženo za 12 s** (4 531 občerstvení, 389 památníků, 292 vyhlídek,
+237× pitná voda, 70 vrcholů, 65 studánek).
+
+| kategorie | od zoomu | | kategorie | od zoomu |
+|---|---|---|---|---|
+| vyhlídka, rozhledna, vrchol | 12 | | památník | 15 |
+| hrad/zámek, studánka, pitná voda | 13 | | občerstvení | 16 |
+
+Prahy vycházejí z hustoty: v běžném výřezu (1200 × 800 px) je při z13 vidět 556 bodů
+(vyhlídky, voda, vrcholy — přesně to, co se hodí při pohledu na celou trasu), při z16 pak
+336 restaurací. **Občerstvení je proto až od z16** — v centru Prahy je restaurací taková
+hustota, že o zoom dřív by z nich byla souvislá plocha. Aby to nevypadalo, že tam žádné
+nejsou, panel pod přepínačem vypisuje, co je ve výřezu vidět a kolik bodů čeká na
+přiblížení.
+
+Dvě pravidla, která dělají většinu užitku:
+
+- **Pamětní destičky a kameny zmizelých se zahazují** (`SKIPPED_MEMORIALS`). V OSM jsou
+  taky `historic=memorial`, ale jsou v dlažbě nebo na zdi a je jich řád — v okolí Karlova
+  nám. **888 z 1 277** pojmenovaných „památníků". Bez toho filtru vrstvu úplně zaplavily
+  a skutečné sochy v nich zanikly. Zbylo 389 soch, bust, válečných pomníků a zřícenin.
+- **Bezejmenná restaurace se zahazuje** (je to šum), **bezejmenná studánka ne** — pro běžce
+  pořád značí vodu.
+
+Klasifikace má verzi (`POI_VERSION` v názvu souboru cache), takže se po její změně stará
+data nepoužijí.
+
+Pozn.: síť PID je **snímek** — `load_transit_graph()` použije `data/transit_graph.json`,
+dokud sedí verze, a GTFS stahuje jen když zip chybí. Dočasně uzavřená stanice (07/2026
+například Flora na trase A) v datech správně chybí, ale i po znovuotevření se sama
+neobjeví — je potřeba smazat `data/pid_gtfs.zip` a `data/transit_graph.json`.
+
 ### Barvy na mapě
 
 Každý navštívený tile se kreslí jednou, barvou podle **období poslední návštěvy** (studená → teplá):
@@ -143,6 +205,8 @@ aby nepřekrývaly popupy tiles a doporučení.
 |---|---|
 | `GET /api/health` | liveness check |
 | `GET /api/basemap` | konfigurace podkladové mapy (Mapy.cz klíč + atribuce, jinak OSM) |
+| `GET /api/transit/metro` | trasy metra a stanice pro orientaci v mapě (z už načtené sítě PID) |
+| `GET /api/pois` | orientační body a občerstvení z OSM; `?lat=&lon=` (výchozí domov) |
 | `GET /api/summary` | počty aktivit, config, metriky pro všechna období |
 | `GET /api/periods/{period}/tiles` | navštívené tiles (GeoJSON); `period` = `all` \| `year` \| `recent` |
 | `GET /api/periods/{period}/frontier` | hraniční tiles |
@@ -379,6 +443,9 @@ pytest -m slow         # kontrolní měření na skutečném grafu Prahy (~1 min
 | `tests/test_itinerary.py` | kilometráž kroků i orientačních bodů, souběžná ulice není křížení, deduplikace napříč kroky, žádné „rovne" |
 | `tests/test_route_quality.py` | *(slow)* podíl délky podél významných ulic a klidných cest, dodržení tolerance, konzistence kilometráže na reálné trase |
 | `tests/test_basemap.py` | zdroj API klíče (env > config), fallback na OSM bez klíče, placeholdery v URL dlaždic |
+| `tests/test_metro.py` | vrstva metra: sloučení nástupišť podle názvu, oba směry jako jeden úsek, přestupní stanice, barvy linek |
+| `tests/test_pois.py` | klasifikace OSM tagů do kategorií, odstupňování podle přiblížení, zahození bezejmenných restaurací, deduplikace |
+| `tests/test_static_cache.py` | statické soubory nesou `Cache-Control: no-cache` a zároveň validátory pro 304 |
 | `tests/test_graph_cache.py` | cache připraveného grafu: zneplatnění při změně parametrů, round-trip, úklid starých otisků, odolnost proti poškozenému souboru |
 | `tests/test_objective.py` | cílová funkce: skóre nikdy nepřeroste přínos ani nespadne pod nulu, symetrie penalizace délky, váha klidu i značené trasy umí přehodit vítěze |
 

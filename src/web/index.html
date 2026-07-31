@@ -61,6 +61,7 @@ html,body,#map{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI
 .slider-ends{display:flex;justify-content:space-between;font-size:10px}
 #route-benefit{font-size:12px;color:#1a202c;background:#f4f6f8;border-radius:6px;padding:8px;line-height:1.5}
 #route-benefit hr.thin{border:0;border-top:1px solid #dde3ea;margin:6px 0}
+.poi-icon{text-align:center;line-height:18px;font-size:14px;text-shadow:0 0 3px #fff,0 0 2px #fff}
 .mapy-logo{display:block;line-height:0}
 .mapy-logo img{height:18px;display:block}
 #sync{margin-top:12px;width:100%;padding:8px;border:0;border-radius:6px;background:#2a78d6;color:#fff;font-weight:600;cursor:pointer}
@@ -78,6 +79,9 @@ html,body,#map{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI
     <label><input type="checkbox" data-overlay="opportunities" checked> Doporucene tiles</label>
     <label><input type="checkbox" data-overlay="cluster" checked> Cluster obrysy</label>
     <label><input type="checkbox" data-overlay="square" checked> Square obrysy</label>
+    <label><input type="checkbox" data-overlay="metro" checked> Metro</label>
+    <label><input type="checkbox" data-overlay="pois"> Orientacni body a obcerstveni</label>
+    <div id="poi-hint" class="label"></div>
   </div>
   <div id="legend"></div>
   <div id="route">
