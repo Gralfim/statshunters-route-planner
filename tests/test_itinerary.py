@@ -8,7 +8,8 @@ import math
 
 import pytest
 
-from itinerary import route_directions
+from geojson import lon_lat_tile, tile_lon_lat
+from itinerary import _tile_depth_m, route_directions
 
 LAT = 50.0
 NODE_SPACING_M = 100.0
@@ -134,3 +135,69 @@ def test_first_step_reports_compass_heading(straight_route):
 def test_empty_path_gives_no_directions(straight_route):
     graph, _path = straight_route
     assert route_directions(graph, ["A"]) == []
+
+
+# --- sber dlazdic (kvuli cemu se cely beh dela) ---
+
+def tile_of(graph, node):
+    return lon_lat_tile(graph.nodes[node]["x"], graph.nodes[node]["y"])
+
+
+def pickups_of(steps):
+    return [tile for step in steps for tile in step["tiles"]]
+
+
+def test_tile_depth_is_measured_from_the_nearest_boundary():
+    """Hloubka rozhoduje, jestli se navsteva zapocita i pri chybe GPS."""
+    tile = lon_lat_tile(14.42, 50.075)
+    west, north = tile_lon_lat(tile[0], tile[1])
+    east, south = tile_lon_lat(tile[0] + 1, tile[1] + 1)
+
+    center = _tile_depth_m((north + south) / 2, (west + east) / 2, tile)
+    near_edge = _tile_depth_m(south + (north - south) * 0.01, (west + east) / 2, tile)
+    assert center > near_edge
+    assert near_edge < 100     # tesne u hranice
+    assert center > 500        # dlazdice ma v nasich sirkach ~1570 m
+
+
+def test_nothing_is_reported_without_targets(straight_route):
+    graph, path = straight_route
+    assert pickups_of(route_directions(graph, path)) == []
+
+
+def test_only_target_tiles_are_reported(straight_route):
+    graph, path = straight_route
+    assert pickups_of(route_directions(graph, path, target_tiles=[(1, 1)])) == []
+    assert pickups_of(route_directions(graph, path, target_tiles=[tile_of(graph, "A")]))
+
+
+def test_pickup_carries_where_and_how_deep(straight_route):
+    graph, path = straight_route
+    pickup = pickups_of(route_directions(graph, path, target_tiles=[tile_of(graph, "A")]))[0]
+    assert pickup["at_km"] >= 0
+    assert pickup["km"] >= 0
+    assert pickup["depth_m"] > 0
+
+
+def test_no_pickup_is_reported_twice(straight_route):
+    """Sousedni kroky sdileji hranicni uzel - pouhy test rozsahu prirazoval
+    dlazdici obema (mereno na realne trase: 7 sberu misto 6)."""
+    graph, path = straight_route
+    steps = route_directions(graph, path, target_tiles=[tile_of(graph, "A")])
+    seen = [(tuple(t["tile"]), t["at_km"]) for t in pickups_of(steps)]
+    assert len(seen) == len(set(seen))
+
+
+def test_waypoint_tiles_are_marked(straight_route):
+    graph, path = straight_route
+    tile = tile_of(graph, "A")
+    plain = pickups_of(route_directions(graph, path, target_tiles=[tile]))
+    goal = pickups_of(route_directions(graph, path, waypoint_tiles=[tile]))
+    assert plain[0]["waypoint"] is False
+    assert goal[0]["waypoint"] is True
+
+
+def test_waypoints_count_as_targets_even_when_not_listed(straight_route):
+    """Cilova dlazdice se nesmi ztratit jen proto, ze neni v target_tiles."""
+    graph, path = straight_route
+    assert pickups_of(route_directions(graph, path, waypoint_tiles=[tile_of(graph, "A")]))

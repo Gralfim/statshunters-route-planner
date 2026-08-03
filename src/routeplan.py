@@ -91,6 +91,13 @@ MAX_FILL_ROUNDS = 5
 # v kazdem kole zkusi. Soucin je pocet exaktnich prepoctu navic.
 MAX_SHRINK_ROUNDS = 2
 SHRINK_CANDIDATES = 3
+
+# Kolik variant se nabidne k vyberu a jak moc se od sebe musi lisit. Bez mery
+# odlisnosti by uzivatel dostal trikrat skoro tutez trasu: portfolio obsahuje
+# hodne prepoctu TEZE sekvence (vyhybani opakovanym ulicim, klidne varianty),
+# ktere se od sebe lisi jen par sty metry. Meri se podilem spolecnych hran.
+MAX_VARIANTS = 3
+MAX_VARIANT_OVERLAP = 0.6
 # Waypoint se umistuje dovnitr tile, ne do jeho stredu - ale s rezervou od
 # hranice, aby tile zustal navstiveny i pri chybe GPS nebo navigace pri behu.
 TILE_MARGIN_M = 75.0
@@ -515,6 +522,30 @@ def _route_details(graph, leg_cache, index, start_node, sequence, min_m, max_m, 
     }
 
 
+def _variant_edges(details):
+    path = details["node_path"]
+    return {edge_id(u, v) for u, v in zip(path, path[1:])}
+
+
+def _distinct_variants(variants, key, limit=MAX_VARIANTS):
+    """Nejlepsi varianty, ktere se navzajem dost lisi (prvni je vitez).
+
+    Bez tohoto filtru vraci portfolio nekolik prepoctu teze trasy - k vyberu
+    maji smysl jen ty, ktere vedou doopravdy jinudy."""
+    chosen, taken = [], []
+    for details in sorted(variants, key=key, reverse=True):
+        edges = _variant_edges(details)
+        if not edges:
+            continue
+        if any(len(edges & other) / len(edges) > MAX_VARIANT_OVERLAP for other in taken):
+            continue
+        chosen.append(details)
+        taken.append(edges)
+        if len(chosen) >= limit:
+            break
+    return chosen
+
+
 def _variant_score(details, target_m, tolerance_m, quiet_weight):
     """Cilova funkce trasy: prinos snizeny tremi podilovymi merkami kvality
     (opakovani ulic, vedeni podel vyznamnych ulic, odchylka delky od cile).
@@ -677,34 +708,54 @@ def plan_tile_loop(graph, start_lat, start_lon, target_km, tolerance_km, candida
         if refined and variant_key(refined) > variant_key(best):
             best = refined
 
-    return {
-        "length_km": round(best["length_m"] / 1000, 2),
-        "target_km": target_km,
-        "tolerance_km": tolerance_km,
-        "within_target": best["in_window"],
-        "start": {"lat": start_lat, "lon": start_lon},
-        "end": {"lat": end[0], "lon": end[1]},
-        "is_loop": is_loop,
-        "waypoint_tiles": [item["tile"] for item in best["sequence"]],
-        "tiles_crossed": best["tiles_crossed"],
-        "coordinates": best["coordinates"],
-        # itinerar se sklada az pro vitezneho kandidata (dohledavani nazvu ulic
-        # je drahe, pro kazdou variantu by se nevyplatilo)
-        "directions": route_directions(graph, best["node_path"]),
-        "benefit": best["benefit"],
-        "repeated_km": round(best["repeated_m"] / 1000, 2),
-        # merky kvality, podle kterych se trasa vybrala - v UI je videt, co
-        # posuvnik "prinos <-> klid" udelal
-        "along_major_km": round(best["along_major_m"] / 1000, 2),
-        "along_major_share": round(best["along_major_m"] / best["length_m"], 3)
-        if best["length_m"] > 0 else 0.0,
-        "trail_km": round(best["trail_m"] / 1000, 2),
-        "trail_share": round(best["trail_m"] / best["length_m"], 3)
-        if best["length_m"] > 0 else 0.0,
-        "quiet_weight": quiet_weight,
-        "score": round(_variant_score(best, target_m, tolerance_m, quiet_weight), 3),
-        "variants_compared": len(variants),
-    }
+    # Vitez patri do vyberu, i kdyz vzesel az z kol vylepsovani (ta do portfolia
+    # nepridavaji).
+    if all(details is not best for details in variants):
+        variants.append(best)
+
+    # Dlazdice, kvuli kterym se beh dela: ty, na ktere trasa mirila (waypointy),
+    # plus vsechny doporucene, ktere cestou protne. Itinerar podle nich rekne,
+    # kde a jak hluboko se sbira.
+    recommended = {tuple(cand["tile"]) for cand in candidates}
+
+    def output(details):
+        length_m = details["length_m"] or 1.0
+        waypoints = [item["tile"] for item in details["sequence"]]
+        collected = [tile for tile in details["tiles_crossed"] if tile in recommended]
+        return {
+            "length_km": round(details["length_m"] / 1000, 2),
+            "target_km": target_km,
+            "tolerance_km": tolerance_km,
+            "within_target": details["in_window"],
+            "start": {"lat": start_lat, "lon": start_lon},
+            "end": {"lat": end[0], "lon": end[1]},
+            "is_loop": is_loop,
+            "waypoint_tiles": waypoints,
+            "tiles_crossed": details["tiles_crossed"],
+            "coordinates": details["coordinates"],
+            "directions": route_directions(graph, details["node_path"],
+                                           target_tiles=collected,
+                                           waypoint_tiles=waypoints),
+            "benefit": details["benefit"],
+            "repeated_km": round(details["repeated_m"] / 1000, 2),
+            # merky kvality, podle kterych se trasa vybrala - v UI je videt, co
+            # posuvnik "prinos <-> klid" udelal
+            "along_major_km": round(details["along_major_m"] / 1000, 2),
+            "along_major_share": round(details["along_major_m"] / length_m, 3),
+            "trail_km": round(details["trail_m"] / 1000, 2),
+            "trail_share": round(details["trail_m"] / length_m, 3),
+            "quiet_weight": quiet_weight,
+            "score": round(_variant_score(details, target_m, tolerance_m, quiet_weight), 3),
+            "variants_compared": len(variants),
+        }
+
+    # Nabidka k vyberu: vitez + varianty, ktere vedou doopravdy jinudy. Itinerar
+    # se sklada pro kazdou z nich (dohledavani nazvu ulic je drahe, proto jen pro
+    # tech par nabidnutych, ne pro cele portfolio).
+    chosen = _distinct_variants(variants, variant_key)
+    result = output(best)
+    result["variants"] = [output(details) for details in chosen if details is not best]
+    return result
 
 
 def route_to_gpx(coordinates, name="StatsHunters route"):

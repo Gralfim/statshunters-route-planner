@@ -492,9 +492,55 @@ const GAIN_LABELS = {
   recent_unvisited: 'nove za 3 mes.'
 };
 
+// Zvyrazneni useku v mape pri kliknuti na radek itinerare. Souradnice kroku se
+// neposilaji - dopocitaji se z kumulativni vzdalenosti po trase, kterou uz
+// pocita odecet vzdalenosti (attachDistanceProbe).
+const highlightLayer = L.layerGroup().addTo(map);
+let routeCumulative = null;
+let highlightedStep = null;
+
+function coordinateAt(km) {
+  if (!routeCumulative) return null;
+  const target = km * 1000;
+  let best = 0;
+  for (let i = 1; i < routeCumulative.length; i++) {
+    if (Math.abs(routeCumulative[i] - target) < Math.abs(routeCumulative[best] - target)) best = i;
+  }
+  return best;
+}
+
+function clearHighlight() {
+  highlightLayer.clearLayers();
+  highlightedStep = null;
+  for (const row of routeDirections.querySelectorAll('li')) {
+    row.classList.remove('active');
+  }
+}
+
+function highlightStep(index, step, row) {
+  if (highlightedStep === index) {   // druhy klik zvyrazneni zrusi
+    clearHighlight();
+    return;
+  }
+  clearHighlight();
+  highlightedStep = index;
+  row.classList.add('active');
+
+  const from = coordinateAt(step.at_km);
+  const to = coordinateAt(step.at_km + step.km);
+  if (from === null || to === null || to <= from) return;
+
+  const part = lastRoute.coordinates.slice(from, to + 1);
+  highlightLayer.addLayer(L.polyline(part, {
+    pane: 'routePane', color: '#e34948', weight: 8, opacity: 0.85
+  }));
+  map.fitBounds(L.latLngBounds(part), { padding: [60, 60], maxZoom: 17 });
+}
+
 // Tahak na trasu: useky s nazvy ulic/cest, delkou a smerem zatoceni.
 function renderDirections(route) {
   const steps = (route && route.directions) || [];
+  clearHighlight();
   if (!steps.length) {
     routeDirections.hidden = true;
     return;
@@ -513,13 +559,79 @@ function renderDirections(route) {
     const forks = (step.forks && step.forks.length)
       ? `<div class="fork">${step.forks.map(f => `${f.at_km.toFixed(2)} km drz se ${f.keep}`).join(' · ')}</div>`
       : '';
-    return `<li>${at} ${turn}${step.label}${trail}${steps_note}${bridge}${heading}${cross}${forks}</li>`;
+    // Kvuli cemu se cely beh dela: kde a jak hluboko se sbira dlazdice.
+    // Melka navsteva je riziko - pri chybe GPS se nemusi zapocitat.
+    const tiles = (step.tiles && step.tiles.length)
+      ? `<div class="tile">${step.tiles.map(t => {
+          const goal = t.waypoint ? 'CIL ' : '';
+          const risk = t.depth_m < 75 ? ' <span class="shallow">jen tesne!</span>' : '';
+          return `${goal}${t.tile[0]},${t.tile[1]} od ${t.at_km.toFixed(1)} km`
+            + ` (${t.km.toFixed(1)} km uvnitr, ${t.depth_m} m od hranice)${risk}`;
+        }).join('<br>')}</div>`
+      : '';
+    return `<li>${at} ${turn}${step.label}${trail}${steps_note}${bridge}${heading}`
+      + `${tiles}${cross}${forks}</li>`;
   }).join('');
 
+  const collected = steps.reduce((sum, step) => sum + (step.tiles || []).length, 0);
+  const picked = collected ? `, sbira ${collected} dlazdic` : '';
   routeDirections.innerHTML =
-    `<details><summary>Itinerar behu (${steps.length} useku, ${route.length_km} km)</summary>`
-    + `<ul class="itinerary">${rows}</ul></details>`;
+    `<details open><summary>Itinerar behu (${steps.length} useku, ${route.length_km} km${picked})`
+    + `</summary><ul class="itinerary">${rows}</ul></details>`;
   routeDirections.hidden = false;
+
+  // klik na radek zvyrazni odpovidajici usek v mape
+  routeDirections.querySelectorAll('li').forEach((row, index) => {
+    row.addEventListener('click', () => highlightStep(index, steps[index], row));
+  });
+}
+
+// Vyber z nekolika dobrych variant. Plánovac uz je porovnal, ale posledni slovo
+// ma uzivatel - podle pocasi a chuti (v horku radeji podel vody a ve stinu).
+// Varianty se nehodnoti, jen popisuji; rozhodnuti je na cloveku.
+const routeVariants = document.querySelector('#route-variants');
+
+function variantSummary(option, index) {
+  const route = option.route || option;          // vyprava nese trasu uvnitr
+  const parts = [];
+  let title = index === 0 ? 'Doporucena' : `Varianta ${index + 1}`;
+
+  if (option.kind) {                             // vyprava, ne holy okruh
+    title += option.kind === 'transit' ? `: ${option.alight.name}` : ': bez MHD';
+    parts.push(`${option.run_km} km behu`, `${Math.round(option.total_min)} min`);
+    if (option.kind === 'transit' && !option.return_stop) parts.push('zpatky domu behem');
+  } else {
+    parts.push(`${route.length_km} km`);
+  }
+
+  parts.push(`prinos ${Math.round(route.benefit.total)}`);
+  parts.push(`${Math.round(route.trail_share * 100)} % po znackach`);
+  parts.push(`${Math.round(route.along_major_share * 100)} % podel rusnych`);
+  if (route.repeated_km > 0) parts.push(`opakovani ${route.repeated_km} km`);
+  return `<span class="vtitle">${title}</span><span class="vmeta">${parts.join(' · ')}</span>`;
+}
+
+function renderVariants(options, onPick) {
+  if (options.length < 2) {
+    routeVariants.hidden = true;
+    return;
+  }
+  routeVariants.innerHTML = '';
+  options.forEach((option, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.innerHTML = variantSummary(option, index);
+    button.setAttribute('aria-pressed', index === 0 ? 'true' : 'false');
+    button.addEventListener('click', () => {
+      for (const other of routeVariants.querySelectorAll('button')) {
+        other.setAttribute('aria-pressed', 'false');
+      }
+      button.setAttribute('aria-pressed', 'true');
+      onPick(option);
+    });
+    routeVariants.appendChild(button);
+  });
+  routeVariants.hidden = false;
 }
 
 function renderBenefit(route) {
@@ -587,6 +699,7 @@ function attachDistanceProbe(layer, coordinates) {
       + L.latLng(coordinates[i - 1]).distanceTo(coordinates[i]);
   }
   const total = cumulative[cumulative.length - 1] / 1000;
+  routeCumulative = cumulative;  // pouziva i zvyrazneni useku z itinerare
 
   layer.bindTooltip('', { sticky: true, direction: 'top', opacity: 0.95 });
   layer.on('mousemove', event => {
@@ -635,6 +748,7 @@ async function planRoute() {
   routeStatus.textContent = 'Porovnavam varianty trasy... v nove oblasti muze prvni vypocet trvat i minuty (stahovani pesi mapy).';
   gpxButton.hidden = true;
   routeBenefit.hidden = true;
+  routeVariants.hidden = true;
   routeSegments.hidden = true;
   routeDirections.hidden = true;
 
@@ -660,14 +774,20 @@ async function planRoute() {
       return;
     }
 
-    drawRoute(route);
-    const target = route.within_target ? '' : ' (mimo toleranci!)';
-    routeStatus.textContent =
-      `Trasa ${route.length_km} km${target}, nejlepsi z ${route.variants_compared} variant; ` +
-      `protne ${route.tiles_crossed.length} tiles (z toho ${route.crossed_recommended} doporucenych).`;
-    renderBenefit(route);
-    renderDirections(route);
-    gpxButton.hidden = false;
+    function show(chosen) {
+      lastRoute = chosen;
+      drawRoute(chosen);
+      const target = chosen.within_target ? '' : ' (mimo toleranci!)';
+      routeStatus.textContent =
+        `Trasa ${chosen.length_km} km${target}, nejlepsi z ${chosen.variants_compared} variant; ` +
+        `protne ${chosen.tiles_crossed.length} tiles (z toho ${chosen.crossed_recommended} doporucenych).`;
+      renderBenefit(chosen);
+      renderDirections(chosen);
+      gpxButton.hidden = false;
+    }
+
+    renderVariants([route, ...(route.variants || [])], show);
+    show(route);
   } catch (error) {
     routeStatus.style.color = '#b91c1c';
     routeStatus.textContent = `Planovani selhalo: ${error.message}`;
@@ -805,6 +925,7 @@ async function planExpedition() {
   routeStatus.textContent = 'Hledam spojeni a porovnavam vypravy... v nove oblasti to muze trvat i minuty.';
   gpxButton.hidden = true;
   routeBenefit.hidden = true;
+  routeVariants.hidden = true;
   routeSegments.hidden = true;
   routeDirections.hidden = true;
 
@@ -826,19 +947,25 @@ async function planExpedition() {
     const expedition = await response.json();
     if (!response.ok) throw new Error(expedition.detail || response.statusText);
 
-    lastRoute = expedition.route;
-    drawExpedition(expedition);
-    renderSegments(expedition);
-    let kind = 'bez MHD (okruh ze startu je nejvyhodnejsi)';
-    if (expedition.kind === 'transit') {
-      const back = expedition.return_stop && expedition.return_stop.name !== expedition.alight.name
-        ? `, navrat z ${expedition.return_stop.name}` : '';
-      kind = `pres ${expedition.alight.name}${back}`;
+    function show(chosen) {
+      lastRoute = chosen.route;
+      drawExpedition(chosen);
+      renderSegments(chosen);
+      let kind = 'bez MHD (okruh ze startu je nejvyhodnejsi)';
+      if (chosen.kind === 'transit') {
+        const back = chosen.return_stop && chosen.return_stop.name !== chosen.alight.name
+          ? `, navrat z ${chosen.return_stop.name}`
+          : (chosen.return_stop ? '' : ', zpatky se bezi domu');
+        kind = `pres ${chosen.alight.name}${back}`;
+      }
+      routeStatus.textContent = `Vyprava ${kind}.`;
+      renderBenefit(chosen.route);
+      renderDirections(chosen.route);
+      gpxButton.hidden = false;
     }
-    routeStatus.textContent = `Nejlepsi vyprava: ${kind}.`;
-    renderBenefit(expedition.route);
-    renderDirections(expedition.route);
-    gpxButton.hidden = false;
+
+    renderVariants([expedition, ...(expedition.variants || [])], show);
+    show(expedition);
   } catch (error) {
     routeStatus.style.color = '#b91c1c';
     routeStatus.textContent = `Planovani vypravy selhalo: ${error.message}`;

@@ -54,9 +54,9 @@ def planned_route():
     captured = {}
     original = routeplan.route_directions
 
-    def capture(g, node_path):
+    def capture(g, node_path, **kwargs):
         captured["node_path"] = node_path
-        return original(g, node_path)
+        return original(g, node_path, **kwargs)
 
     routeplan.route_directions = capture
     try:

@@ -366,9 +366,14 @@ def plan_route(request: RouteRequest):
         raise HTTPException(status_code=422, detail=str(exc))
 
     candidate_tiles = {tuple(item["tile"]) for item in opportunities}
-    route["crossed_recommended"] = sum(1 for tile in route["tiles_crossed"] if tile in candidate_tiles)
-    _annotate_landmarks(route, lat, lon, reach_km)
-    route["gpx"] = route_to_gpx(route["coordinates"])
+    # Kazda nabidnuta varianta musi byt kompletni - uzivatel si ji vybere a
+    # rovnou chce itinerar i GPX, bez dalsiho dotazu na server.
+    for variant in [route] + route.get("variants", []):
+        variant["crossed_recommended"] = sum(
+            1 for tile in variant["tiles_crossed"] if tile in candidate_tiles
+        )
+        _annotate_landmarks(variant, lat, lon, reach_km)
+        variant["gpx"] = route_to_gpx(variant["coordinates"])
     return route
 
 
@@ -415,11 +420,12 @@ def plan_expedition_endpoint(request: ExpeditionRequest):
     except RuntimeError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
-    run = plan["route"]
-    center_lat = sum(c[0] for c in run["coordinates"]) / len(run["coordinates"])
-    center_lon = sum(c[1] for c in run["coordinates"]) / len(run["coordinates"])
-    _annotate_landmarks(run, center_lat, center_lon, run["length_km"] / 2 + 1)
-    run["gpx"] = route_to_gpx(run["coordinates"])
+    for option in [plan] + plan.get("variants", []):
+        run = option["route"]
+        center_lat = sum(c[0] for c in run["coordinates"]) / len(run["coordinates"])
+        center_lon = sum(c[1] for c in run["coordinates"]) / len(run["coordinates"])
+        _annotate_landmarks(run, center_lat, center_lon, run["length_km"] / 2 + 1)
+        run["gpx"] = route_to_gpx(run["coordinates"])
     return plan
 
 

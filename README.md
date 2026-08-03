@@ -397,6 +397,18 @@ Jak to funguje:
      hranice úseku není důvod uvádět Legerovu dvakrát po sobě.
    - **Žádné prázdné pokyny**: změna názvu ulice bez zatočení není pokyn. Dřív se
      hlásila jako „rovne" a tvořila polovinu řádků itineráře.
+   - **Sběr dlaždic** — kvůli čemu se celý běh dělá. U kroku, kde trasa do cílové
+     dlaždice vjede, se uvádí která, od kolika km, kolik kilometrů je uvnitř a
+     **jak hluboko od hranice** se dostane. Hloubka rozhoduje, jestli se návštěva
+     započítá i při chybě GPS; pod `TILE_MARGIN_M` (75 m) panel varuje „jen těsně!".
+     Počítá se přes celou trasu najednou, ne po krocích — dlaždice přetékající přes
+     několik úseků tak dá jeden záznam se skutečnou hloubkou, ne tři útržky; a každý
+     sběr patří právě jednomu kroku (sousední kroky sdílejí hraniční uzel, takže
+     pouhý test rozsahu dlaždici přiřadil oběma).
+   - **Klikatelné řádky**: kliknutí na řádek zvýrazní odpovídající úsek v mapě a
+     přiblíží se k němu, druhý klik zvýraznění zruší. Souřadnice kroků se neposílají —
+     dopočítají se v prohlížeči z kumulativní vzdálenosti, kterou už počítá odečet
+     vzdálenosti po trase.
    - **Značené trasy**: turistické a cyklotrasy jsou v OSM **relace**, které osmnx
      features nevrací — stahují se přímo z Overpass (`build_trails`, 443 relací /
      31 tis. úseků pro Prahu za ~4 s) a přiřazují hranám stejným mechanismem jako
@@ -414,7 +426,19 @@ Jak to funguje:
      od startu běhu a kolik zbývá (jako v mapy.cz), s kroužkem na nejbližším bodě
      trasy. Slouží k přesnému popisu míst („nepřesnost v 3,2 km"). Počítá se v
      prohlížeči z bodů trasy — souhlasí s délkou i itinerářem na jednotky metrů.
-8. **Výstup**: délka, waypoint tiles, všechny protnuté tiles (počítané z plné
+8. **Výběr z variant**: plánovač nevrací jen vítěze, ale **až 3 varianty k výběru**
+   (`MAX_VARIANTS`). Portfolio jich porovná kolem dvanácti, jenže většina jsou přepočty
+   *téže* sekvence (vyhýbání opakovaným ulicím, klidné varianty) lišící se o pár set
+   metrů — nabízet je všechny by nedávalo smysl. Vybírají se proto jen ty, které vedou
+   doopravdy jinudy: měří se **podíl společných hran** a varianta se zahodí, když jich
+   s některou už vybranou sdílí přes `MAX_VARIANT_OVERLAP` (60 %). Naměřeno na okruhu
+   15 ± 3 km z Karlova nám. — tři varianty se stejným přínosem 112,5, ale jiným
+   charakterem (47 % / 79 % / 63 % po značkách, 1,5 % / 0,9 % / 13,2 % podél rušných),
+   sdílející s vítězem 44 % a 60 % bodů. Každá je **kompletní** včetně itineráře a GPX,
+   takže přepnutí v panelu nevyžaduje další dotaz na server. Varianty se nehodnotí —
+   jen popisují; poslední slovo má uživatel (v horku se hodí jiná trasa než v zimě).
+   Cena: skládání itineráře pro tři trasy místo jedné, plánování 7 → 15 s.
+9. **Výstup**: délka, waypoint tiles, všechny protnuté tiles (počítané z plné
    geometrie hran — trasy v mapě i GPX kopírují skutečné tvary ulic), rozpad
    přínosu, itinerář, počet porovnaných variant, GPX. Navíc **měrky, podle kterých
    se trasa vybrala** (`along_major_km/_share`, `trail_km/_share`, `repeated_km`,
@@ -440,7 +464,7 @@ pytest -m slow         # kontrolní měření na skutečném grafu Prahy (~1 min
 | `tests/test_metrics.py` | max square a max cluster (4-sousednost, díry, prázdná množina) |
 | `tests/test_scoring.py` | pořadí vah priorit, neaditivita zisků nad množinou, square vážený plochou, strop staleness |
 | `tests/test_cost_model.py` | pořadí preferencí typů cest + kontext: chodník podél rušné ulice prohrává s klidnou ulicí, značka je bonus, kontext hranu nikdy nezlevní |
-| `tests/test_itinerary.py` | kilometráž kroků i orientačních bodů, souběžná ulice není křížení, deduplikace napříč kroky, žádné „rovne" |
+| `tests/test_itinerary.py` | kilometráž kroků i orientačních bodů, souběžná ulice není křížení, deduplikace napříč kroky, žádné „rovne"; sběr dlaždic (hloubka průniku, každý sběr právě jednou) |
 | `tests/test_route_quality.py` | *(slow)* podíl délky podél významných ulic a klidných cest, dodržení tolerance, konzistence kilometráže na reálné trase |
 | `tests/test_basemap.py` | zdroj API klíče (env > config), fallback na OSM bez klíče, placeholdery v URL dlaždic |
 | `tests/test_metro.py` | vrstva metra: sloučení nástupišť podle názvu, oba směry jako jeden úsek, přestupní stanice, barvy linek |
@@ -448,7 +472,7 @@ pytest -m slow         # kontrolní měření na skutečném grafu Prahy (~1 min
 | `tests/test_static_cache.py` | statické soubory nesou `Cache-Control: no-cache` a zároveň validátory pro 304 |
 | `tests/test_expedition.py` | časové okno běhu (doběh a jízda ho zkracují, 24minutový strop na spojení), jednosměrný tvar dá širší okno, práh pro blízké cíle, odhad sklizně |
 | `tests/test_graph_cache.py` | cache připraveného grafu: zneplatnění při změně parametrů, round-trip, úklid starých otisků, odolnost proti poškozenému souboru |
-| `tests/test_objective.py` | cílová funkce: skóre nikdy nepřeroste přínos ani nespadne pod nulu, symetrie penalizace délky, váha klidu i značené trasy umí přehodit vítěze |
+| `tests/test_objective.py` | cílová funkce: skóre nikdy nepřeroste přínos ani nespadne pod nulu, symetrie penalizace délky, váha klidu i značené trasy umí přehodit vítěze; výběr variant (vítěz první, skoro stejné se sloučí) |
 
 Rychlé testy běží nad **ručně postavenými grafy** (`line_graph` fixture v `conftest.py`) —
 délky hran se zadávají nezávisle na vzdálenosti uzlů, protože v OSM `length` kopíruje
@@ -471,6 +495,11 @@ a 120 min:
 | čistý okruh bez MHD | 112,5 | 14,93 km | 89,6 min *(30 min nevyužito)* |
 | MHD tam i zpět (okruh u cíle) | 124,8 | 12,64 km | 111,7 min |
 | **jednosměrná: metro A na Motol, běh domů** | **307,7** | 16,49 km | 118,1 min |
+
+I výprava se nabízí **v několika variantách** (`MAX_EXPEDITION_VARIANTS`) — různé cílové
+zastávky a tvary, každá kompletní i s během, itinerářem a GPX. Rozlišují se podle dvojice
+(tvar, výstupní zastávka); vnitřní varianty samotného běhu se zahazují, dvouúrovňový výběr
+(kam jet a kudy běžet) by byl matoucí.
 
 Okruh se zpáteční jízdou se počítá až jako náhrada pro cíle, ze kterých se domů doběhnout
 nedá (`ONEWAY_HOME_SHARE`) — plánovat oba tvary pro každého kandidáta by dobu plánování
@@ -576,21 +605,21 @@ v cenách hran a čtyři vady itineráře (viz „Plánování tras", body 5 a 6
    opakování 0–1 % (Karlovo nám. i Zahradní Město), takže současná metrika ten jev
    nezachytí. Chtělo by to měřit blízkost trasy k sobě samé (např. podíl délky, která
    vede do X metrů od dřívějšího úseku), a teprve to dát do cílové funkce.
-3. **Nabídnout několik dobrých variant, ne jen nejlepší.** Uživatel si chce vybírat podle
-   chuti a počasí („v horku raději podél vody a ve stínu"). Portfolio variant v
-   `routeplan` už existuje — dnes se z něj jen vezme maximum a zbytek zahodí. Vracet
-   top-N *různých* variant (ne drobné obměny téže trasy) s popisem, čím se liší
-   (podíl podél vody, ve stínu, po značkách, délka, přínos), a nechat volbu na uživateli.
-   Vyžaduje: míru odlišnosti tras, aby se nenabízely tři skoro stejné, a měrku stínu
-   (`natural=wood`, `landuse=forest`) a vody, které zatím nemáme.
+3. ~~Nabídnout několik dobrých variant, ne jen nejlepší.~~ **Hotovo (07/2026):** viz
+   „Výběr z variant" níže. Zbývá případně měrka stínu (`natural=wood`, `landuse=forest`)
+   a vody, aby šlo varianty popsat i podle nich — zatím se popisují délkou, přínosem,
+   podílem po značkách a podél rušných ulic a rozhodnutí je na uživateli.
 4. **Itinerář na rozhodovacích bodech.** Dnes vzniká řádek na každou změnu názvu cesty —
    běžec potřebuje řádek tam, kde se dá zabloudit, plus průběžné potvrzovací záchytné body.
    Na referenční trase je ~109 ostrých odboček na křižovatkách proti 21 pokynům; slučování
    krátkých úseků (`STEP_MIN_M`) navíc rozhodovací body maže. Přidat odstupňování odbočky
    („mírně/ostře" — dnes je 35–150° všechno stejné „vlevo") a čas úseku podle tempa.
-5. **Dlaždice v itineráři.** `directions` o cílových dlaždicích neobsahují nic, ačkoli
-   `waypoint_tiles` v odpovědi je. Označit kroky, kde trasa sbírá cílovou dlaždici, včetně
-   pokynu, jak hluboko dovnitř — bez toho itinerář ignoruje účel celé aplikace.
+5. ~~Dlaždice v itineráři.~~ **Hotovo (07/2026):** viz „Itinerář běhu" výše.
+   Odhalilo to ale defekt v plánovači: **`_trim_spurs` uřízne průnik do cílové dlaždice**.
+   Zachovává *množinu* protnutých dlaždic, ne hloubku — na referenční trase má cílová
+   dlaždice v bezpečné zóně 2 362 uzlů (až 778 m hluboko), ale trasa jí projde jen
+   5 uzly a **nejhlouběji 49 m**, tedy pod `TILE_MARGIN_M` (75 m), který má chránit proti
+   chybě GPS. Ořez nesmí snížit hloubku pod tuto mez.
 6. **Popisky, které nelžou.** Nepojmenovaný chodník dědí název souběžné ulice do 40 m, takže
    „Bělehradská" může být pěšina v parku vedle ní; `_vote_step_name` pojmenuje krok ulicí
    pokrývající jen 40 % délky; `absorb` neaktualizuje `named`/`kind`, takže se pohlcený úsek

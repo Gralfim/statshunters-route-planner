@@ -30,6 +30,7 @@ TRANSIT_SPEED_KMH = 40          # hruby horni odhad rychlosti MHD vc. cekani (pr
 # Kandidati s uz stazenym grafem jsou levni (bez cekani na Overpass) a po
 # uvolneni predfiltru jich vetsinou par je, takze se jich vyplati projit vic.
 MAX_EXACT_TRANSIT_PLANS = 5
+MAX_EXPEDITION_VARIANTS = 3  # kolik dalsich vyprav se nabidne k vyberu
 MIN_LOOP_KM = 3.0
 MIN_TARGET_BENEFIT = 20.0
 MAX_TARGET_SPAN_TILES = 6       # vetsi skupiny nejsou cil jednoho behu - deli se
@@ -579,6 +580,23 @@ def plan_expedition(start_lat, start_lon, target_km, tolerance_km, budget_min, p
 
     plans.sort(key=lambda plan: (not plan["within_budget"], -plan["benefit"]["total"], plan["total_min"]))
     best = plans[0]
+
+    # Nabidka k vyberu: dalsi vypravy, ktere vedou jinam nebo maji jiny tvar.
+    # Vnitrni varianty jejich behu se zahazuji - dvouurovnovy vyber (kam jet
+    # a kudy bezet) by byl v UI matouci a odpoved zbytecne velka.
+    seen_shapes = {(best["kind"], (best.get("alight") or {}).get("name"))}
+    variants = []
+    for plan in plans[1:]:
+        shape = (plan["kind"], (plan.get("alight") or {}).get("name"))
+        if shape in seen_shapes:
+            continue
+        seen_shapes.add(shape)
+        plan["route"].pop("variants", None)
+        variants.append(plan)
+        if len(variants) >= MAX_EXPEDITION_VARIANTS:
+            break
+    best["variants"] = variants
+    best["route"].pop("variants", None)
     best["alternatives"] = [
         {
             "alight": candidate["alight"]["name"],

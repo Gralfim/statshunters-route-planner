@@ -6,8 +6,8 @@ o skutecny graf tu nejde.
 """
 import pytest
 
-from routeplan import (LENGTH_PENALTY_FRACTION, REPEAT_PENALTY_FRACTION,
-                       TRAIL_PENALTY_FRACTION, _variant_score)
+from routeplan import (LENGTH_PENALTY_FRACTION, MAX_VARIANTS, REPEAT_PENALTY_FRACTION,
+                       TRAIL_PENALTY_FRACTION, _distinct_variants, _variant_score)
 
 TARGET_M = 15000.0
 TOLERANCE_M = 3000.0
@@ -175,6 +175,46 @@ def test_repeated_streets_are_penalised():
 
 def test_fully_repeated_route_loses_the_whole_fraction():
     assert score(repeated_m=TARGET_M) == pytest.approx(100.0 * (1 - REPEAT_PENALTY_FRACTION))
+
+
+# --- nabidka variant k vyberu ---
+
+def variant(node_path, rank):
+    return {"node_path": node_path, "rank": rank}
+
+
+def pick(variants, limit=MAX_VARIANTS):
+    return _distinct_variants(variants, lambda details: details["rank"], limit)
+
+
+def test_winner_is_offered_first():
+    winner = variant([1, 2, 3, 4], rank=10)
+    other = variant([5, 6, 7, 8], rank=5)
+    assert pick([other, winner])[0] is winner
+
+
+def test_near_identical_variants_collapse_into_one():
+    """Portfolio obsahuje hodne prepoctu TEZE sekvence (vyhybani opakovani,
+    klidne varianty) - nabizet trikrat tutez trasu nema smysl."""
+    original = variant([1, 2, 3, 4, 5, 6], rank=10)
+    almost_same = variant([1, 2, 3, 4, 5, 9], rank=9)
+    assert pick([original, almost_same]) == [original]
+
+
+def test_genuinely_different_variants_are_offered():
+    first = variant([1, 2, 3, 4, 5, 6], rank=10)
+    elsewhere = variant([20, 21, 22, 23, 24, 25], rank=9)
+    assert pick([first, elsewhere]) == [first, elsewhere]
+
+
+def test_offer_is_capped():
+    variants = [variant([10 * i, 10 * i + 1, 10 * i + 2], rank=-i) for i in range(8)]
+    assert len(pick(variants)) == MAX_VARIANTS
+    assert len(pick(variants, limit=2)) == 2
+
+
+def test_route_without_edges_is_not_offered():
+    assert pick([variant([7], rank=10)]) == []
 
 
 def test_penalties_compose_multiplicatively():

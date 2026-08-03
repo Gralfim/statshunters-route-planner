@@ -44,7 +44,13 @@ html,body,#map{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI
 #route-directions{font-size:12px;color:#1a202c;background:#f4f6f8;border-radius:6px;padding:8px}
 #route-directions summary{cursor:pointer;font-weight:600}
 #route-directions .itinerary{margin:6px 0 0;padding:0;list-style:none}
-#route-directions .itinerary li{padding:3px 0;border-top:1px solid #e5e9ef;line-height:1.4}
+#route-directions .itinerary li{padding:3px 4px;border-top:1px solid #e5e9ef;line-height:1.4;
+  cursor:pointer;border-radius:4px}
+#route-directions .itinerary li:hover{background:#e9edf2}
+#route-directions .itinerary li.active{background:#fde8e8;box-shadow:inset 3px 0 0 #e34948}
+#route-directions .tile{margin-left:44px;color:#4a3aa7;font-size:11px}
+#route-directions .tile::before{content:"sbira: "}
+#route-directions .shallow{color:#b91c1c;font-weight:700}
 #route-directions .turn{font-weight:700}
 #route-directions .dist{display:inline-block;min-width:44px;color:#53606f;font-variant-numeric:tabular-nums}
 #route-directions .cross{margin-left:44px;color:#2a78d6;font-size:11px}
@@ -61,6 +67,13 @@ html,body,#map{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI
 .slider-ends{display:flex;justify-content:space-between;font-size:10px}
 #route-benefit{font-size:12px;color:#1a202c;background:#f4f6f8;border-radius:6px;padding:8px;line-height:1.5}
 #route-benefit hr.thin{border:0;border-top:1px solid #dde3ea;margin:6px 0}
+#route-variants{display:grid;gap:4px}
+#route-variants button{text-align:left;padding:6px 8px;border:1px solid #d7dde3;border-radius:6px;
+  background:#fff;cursor:pointer;font-size:11px;line-height:1.4;color:#1a202c}
+#route-variants button:hover{border-color:#9aa2af}
+#route-variants button[aria-pressed="true"]{border-color:#111827;background:#eef1f5;font-weight:600}
+#route-variants .vtitle{display:block;font-size:12px}
+#route-variants .vmeta{color:#53606f}
 .poi-icon{text-align:center;line-height:18px;font-size:14px;text-shadow:0 0 3px #fff,0 0 2px #fff}
 .mapy-logo{display:block;line-height:0}
 .mapy-logo img{height:18px;display:block}
@@ -104,6 +117,7 @@ html,body,#map{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI
     <button id="plan">Naplanovat trasu</button>
     <button id="plan-expedition">Naplanovat vypravu (s MHD)</button>
     <div id="route-status"></div>
+    <div id="route-variants" hidden></div>
     <div id="route-benefit" hidden></div>
     <div id="route-segments" hidden></div>
     <div id="route-directions" hidden></div>

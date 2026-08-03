@@ -13,6 +13,7 @@ import math
 from collections import defaultdict
 
 from geo import bearing, compass, haversine_m, tag
+from geojson import lon_lat_tile, tile_lon_lat
 from runcost import best_edge
 
 WAY_LABELS = {
@@ -56,6 +57,57 @@ FORK_MIN_DEG = 25.0
 FORK_IGNORED_HIGHWAYS = {"service", "steps", "corridor", "elevator"}
 FORK_PATH_HIGHWAYS = {"track", "path", "bridleway", "footway", "cycleway"}
 FORK_REPORT_KINDS = {"polni cesta", "pesina"}  # kde rozcesti hlasit
+
+
+def _tile_depth_m(lat, lon, tile):
+    """Jak hluboko od hranice dlazdice bod lezi. Rozhoduje o tom, jestli se
+    navsteva zapocita i pri chybe GPS - trasa jen tecna k hranici je riziko."""
+    x, y = tile
+    west, north = tile_lon_lat(x, y)
+    east, south = tile_lon_lat(x + 1, y + 1)
+    coslat = math.cos(math.radians(lat))
+    return min(
+        (lat - south) * 111320.0,
+        (north - lat) * 111320.0,
+        (lon - west) * 111320.0 * coslat,
+        (east - lon) * 111320.0 * coslat,
+    )
+
+
+def _tile_pickups(graph, node_path, cumulative, targets, waypoints):
+    """Useky, kde trasa sbira cilovou dlazdici - kvuli cemu se cely beh dela.
+
+    Pocita se pres CELOU trasu najednou (ne po krocich), aby dlazdice pretekajici
+    pres nekolik useku dala jeden zaznam se skutecnou hloubkou pruniku, ne tri
+    utrzky. Dlazdice se urcuje z uzlu; geometrie hrany mezi nimi muze zavadit
+    jeste jinam, ale pro "kde na trase jsem uvnitr" to staci.
+    """
+    runs = []
+    current = None
+    for position, node in enumerate(node_path):
+        tile = lon_lat_tile(graph.nodes[node]["x"], graph.nodes[node]["y"])
+        if tile not in targets:
+            current = None
+            continue
+        depth = _tile_depth_m(graph.nodes[node]["y"], graph.nodes[node]["x"], tile)
+        if current is not None and current["tile"] == tile:
+            current["end"] = position
+            current["depth"] = max(current["depth"], depth)
+        else:
+            current = {"tile": tile, "start": position, "end": position, "depth": depth}
+            runs.append(current)
+
+    return [
+        {
+            "start": run["start"],
+            "tile": list(run["tile"]),
+            "at_km": round(cumulative[run["start"]] / 1000, 2),
+            "km": round((cumulative[run["end"]] - cumulative[run["start"]]) / 1000, 2),
+            "depth_m": round(run["depth"]),
+            "waypoint": run["tile"] in waypoints,
+        }
+        for run in runs
+    ]
 
 
 def _turn_word(previous_bearing, next_bearing):
@@ -205,12 +257,20 @@ def _vote_trail(step):
     return best if covered >= 0.3 * step["m"] else None
 
 
-def route_directions(graph, node_path):
+def route_directions(graph, node_path, target_tiles=(), waypoint_tiles=()):
     """Itinerar behu: useky se stejnym popisem slouceny, s kumulativni
     vzdalenosti, smerem zatoceni a orientacnimi body (krizene vyznamne ulice).
-    Slouzi jako tahak na trasu."""
+    Slouzi jako tahak na trasu.
+
+    target_tiles/waypoint_tiles - dlazdice, kvuli kterym se beh dela. Bez nich
+    itinerar mlci o ucelu cele trasy: rekne, kudy bezet, ale ne kde a jak hluboko
+    se sbira."""
     if len(node_path) < 2:
         return []
+
+    targets = {tuple(tile) for tile in target_tiles}
+    waypoints = {tuple(tile) for tile in waypoint_tiles}
+    targets |= waypoints
 
     # Kumulativni vzdalenost k jednotlivym bodum trasy ze SKUTECNE delky hran -
     # stejne jako delka trasy i delka kroku (viz docstring modulu).
@@ -294,6 +354,9 @@ def route_directions(graph, node_path):
         else:
             merged.append(step)
 
+    pickups = _tile_pickups(graph, node_path, cumulative, targets, waypoints)
+    pickup_index = 0  # kazdy sber patri prave jednomu kroku
+
     labels = [step["label"] for step in merged]
     directions = []
     previous_out = None
@@ -341,9 +404,19 @@ def route_directions(graph, node_path):
                 if keep:
                     forks.append({"at_km": round(cumulative[position] / 1000, 2), "keep": keep})
 
+        # Sber dlazdic patri ke kroku, ve kterem do ni trasa vjede. Sousedni
+        # kroky sdileji hranicni uzel, takze pouhy test rozsahu by dlazdici
+        # priradil obema - proto se sbery odebiraji po poradku.
+        tiles = []
+        while pickup_index < len(pickups) and pickups[pickup_index]["start"] <= step["nodes"][-1]:
+            pickup = pickups[pickup_index]
+            tiles.append({key: value for key, value in pickup.items() if key != "start"})
+            pickup_index += 1
+
         directions.append({
             "at_km": round(start_m / 1000, 2),
             "km": round(step["m"] / 1000, 2),
+            "tiles": tiles,
             "label": step["label"],
             "kind": step["kind"],
             "trail": trail,
