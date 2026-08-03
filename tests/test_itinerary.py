@@ -201,3 +201,25 @@ def test_waypoints_count_as_targets_even_when_not_listed(straight_route):
     """Cilova dlazdice se nesmi ztratit jen proto, ze neni v target_tiles."""
     graph, path = straight_route
     assert pickups_of(route_directions(graph, path, waypoint_tiles=[tile_of(graph, "A")]))
+
+
+def test_pickup_is_measured_along_the_route_geometry(line_graph):
+    """Uzly jsou rozestoupene desitky metru; merit sber po nich hlasilo vjezd
+    pozde a delku uvnitr kratsi (7,29 km / 0,22 km misto 7,24 km / 0,27 km).
+    Souradnice kopiruji geometrii hran - a jsou to tytez body, ze kterych se
+    pocita prinos trasy."""
+    tile = lon_lat_tile(14.42, 50.075)
+    west, north = tile_lon_lat(tile[0], tile[1])
+    east, south = tile_lon_lat(tile[0] + 1, tile[1] + 1)
+    lon = (west + east) / 2
+    step = (north - south) / 20
+
+    nodes = {"a": (south - step, lon), "b": (south + 10 * step, lon)}
+    graph = line_graph(nodes, [("a", "b", {"name": "Dlouha", "length": 2000.0})])
+    # trasa mezi uzly prochazi dlazdici - uzel "a" je jeste mimo ni
+    coordinates = [(south - step + i * step, lon) for i in range(12)]
+
+    steps = route_directions(graph, ["a", "b"], target_tiles=[tile], coordinates=coordinates)
+    pickup = [t for s in steps for t in s["tiles"]][0]
+    assert pickup["at_km"] > 0, "vjezd nesmi vyjit na zacatku trasy - uzel 'a' je mimo"
+    assert pickup["km"] > 0

@@ -349,7 +349,14 @@ Jak to funguje:
    efektivní poloměr ~700 m) — bez té korekce nadhodnocovaly délku 1,5–4× a trasy
    vycházely zbytečně krátké.
 5. **Ořez ocásků**: slepé úseky tam-a-zpět se zkracují na nejmenší délku, která
-   zachová množinu protnutých tiles — přínos se nemění, hluchá vzdálenost mizí.
+   zachová množinu protnutých tiles **i bezpečnou hloubku průniku**. Původně stačilo, aby
+   dlaždici pokrýval jakýkoli jiný uzel trasy — jenže právě špička ocásku bývá to, kvůli
+   čemu se do dlaždice zajíždělo, takže ořez nechal trasu, která ji jen škrábne. Naměřeno:
+   cílová dlaždice měla v bezpečné zóně 2 362 uzlů (až 778 m hluboko), ale trasa jí prošla
+   **nejhlouběji 49 m** — pod `TILE_MARGIN_M` (75 m), který má chránit proti chybě GPS.
+   Uzel se teď nesmí odříznout, když je poslední dost hluboký ve svém tile. Po opravě:
+   hloubka **49 → 98 m**, u sousední dlaždice 72 → 95 m, žádná mělká nezůstala; trasa se
+   prodloužila o 120 m (14,93 → 15,05 km). Přínos se nemění, hluchá vzdálenost mizí.
    Navíc se **penalizuje průchod stejnou ulicí**: hrana už použitá na trase se při
    plánování dalšího úseku zdraží, takže se okruh vrací jinudy. Nízkoopakovací
    varianty se počítají rovnou v portfoliu (top 3 seedy, `AVOID_VARIANTS`), ne až
@@ -403,8 +410,13 @@ Jak to funguje:
      započítá i při chybě GPS; pod `TILE_MARGIN_M` (75 m) panel varuje „jen těsně!".
      Počítá se přes celou trasu najednou, ne po krocích — dlaždice přetékající přes
      několik úseků tak dá jeden záznam se skutečnou hloubkou, ne tři útržky; a každý
-     sběr patří právě jednomu kroku (sousední kroky sdílejí hraniční uzel, takže
-     pouhý test rozsahu dlaždici přiřadil oběma).
+     sběr patří právě jednomu kroku.
+     Měří se **po souřadnicích trasy, ne po uzlech grafu**. Uzly jsou rozestoupené
+     desítky metrů, takže vjezd vycházel pozdě a délka uvnitř kratší, než je (naměřeno:
+     hlášeno „od 7,29 km, 0,22 km uvnitř", ve skutečnosti od 7,24 km a 0,27 km) — a
+     protože 7,29 přeteklo konec svého kroku, vypadalo i přiřazení špatně. Souřadnice
+     navíc kopírují geometrii hran, tedy tytéž body, ze kterých se počítá
+     `tiles_crossed` a z něj přínos trasy, takže si obojí nemůže odporovat.
    - **Klikatelné řádky**: kliknutí na řádek zvýrazní odpovídající úsek v mapě a
      přiblíží se k němu, druhý klik zvýraznění zruší. Souřadnice kroků se neposílají —
      dopočítají se v prohlížeči z kumulativní vzdálenosti, kterou už počítá odečet
@@ -467,6 +479,7 @@ pytest -m slow         # kontrolní měření na skutečném grafu Prahy (~1 min
 | `tests/test_itinerary.py` | kilometráž kroků i orientačních bodů, souběžná ulice není křížení, deduplikace napříč kroky, žádné „rovne"; sběr dlaždic (hloubka průniku, každý sběr právě jednou) |
 | `tests/test_route_quality.py` | *(slow)* podíl délky podél významných ulic a klidných cest, dodržení tolerance, konzistence kilometráže na reálné trase |
 | `tests/test_basemap.py` | zdroj API klíče (env > config), fallback na OSM bez klíče, placeholdery v URL dlaždic |
+| `tests/test_trim_spurs.py` | ořez ocásků: hluboká špička přežije, mělká se ořízne, trasa zůstane souvislá |
 | `tests/test_metro.py` | vrstva metra: sloučení nástupišť podle názvu, oba směry jako jeden úsek, přestupní stanice, barvy linek |
 | `tests/test_pois.py` | klasifikace OSM tagů do kategorií, odstupňování podle přiblížení, zahození bezejmenných restaurací, deduplikace |
 | `tests/test_static_cache.py` | statické soubory nesou `Cache-Control: no-cache` a zároveň validátory pro 304 |
@@ -614,12 +627,9 @@ v cenách hran a čtyři vady itineráře (viz „Plánování tras", body 5 a 6
    Na referenční trase je ~109 ostrých odboček na křižovatkách proti 21 pokynům; slučování
    krátkých úseků (`STEP_MIN_M`) navíc rozhodovací body maže. Přidat odstupňování odbočky
    („mírně/ostře" — dnes je 35–150° všechno stejné „vlevo") a čas úseku podle tempa.
-5. ~~Dlaždice v itineráři.~~ **Hotovo (07/2026):** viz „Itinerář běhu" výše.
-   Odhalilo to ale defekt v plánovači: **`_trim_spurs` uřízne průnik do cílové dlaždice**.
-   Zachovává *množinu* protnutých dlaždic, ne hloubku — na referenční trase má cílová
-   dlaždice v bezpečné zóně 2 362 uzlů (až 778 m hluboko), ale trasa jí projde jen
-   5 uzly a **nejhlouběji 49 m**, tedy pod `TILE_MARGIN_M` (75 m), který má chránit proti
-   chybě GPS. Ořez nesmí snížit hloubku pod tuto mez.
+5. ~~Dlaždice v itineráři.~~ **Hotovo (07/2026):** viz „Itinerář běhu" výše. Odhalilo to
+   dva defekty, oba opravené: ořez slepých ocásků ubíral hloubku průniku do dlaždice
+   (viz bod 4 v „Plánování tras") a sběr se měřil po uzlech místo po geometrii trasy.
 6. **Popisky, které nelžou.** Nepojmenovaný chodník dědí název souběžné ulice do 40 m, takže
    „Bělehradská" může být pěšina v parku vedle ní; `_vote_step_name` pojmenuje krok ulicí
    pokrývající jen 40 % délky; `absorb` neaktualizuje `named`/`kind`, takže se pohlcený úsek

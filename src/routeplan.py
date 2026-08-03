@@ -185,19 +185,45 @@ def _leg_weighted(graph, a, b, used_edges=None, quiet_factor=1.0, trail_factor=1
     return path_length_m(graph, path), path
 
 
-def _trim_spurs(node_tiles, node_path):
-    """Zkrati slepe ocasky (usek ke stredu tile a zpet stejnou cestou) na
-    nejkratsi delku zachovavajici mnozinu protnutych tiles: spicka ocasku
-    odpada, dokud jeji tile pokryva jiny uzel trasy."""
+def _trim_spurs(graph, node_tiles, node_path):
+    """Zkrati slepe ocasky (usek do tile a zpet stejnou cestou) na nejkratsi
+    delku, ktera zachova protnute tiles - VCETNE bezpecne hloubky pruniku.
+
+    Puvodne stacilo, aby tile pokryval jakykoli jiny uzel trasy. Jenze prave
+    spicka ocasku byla to, kvuli cemu se do dlazdice zajizdelo: ores nechal
+    trasu, ktera dlazdici jen skrabne. Mereno na referencni trase - cilova
+    dlazdice mela v bezpecne zone 2 362 uzlu (az 778 m hluboko), ale trasa ji
+    prosla nejhloub 49 m, tedy pod TILE_MARGIN_M, ktery ma chranit proti chybe
+    GPS. Uzel se proto nesmi odriznout, kdyz je posledni dost hluboky ve svem
+    tile."""
     from collections import Counter
+
+    from itinerary import _tile_depth_m
+
+    def depth(node):
+        return _tile_depth_m(graph.nodes[node]["y"], graph.nodes[node]["x"], node_tiles[node])
 
     path = list(node_path)
     counts = Counter(node_tiles[node] for node in path)
+    deep = Counter(node_tiles[node] for node in path if depth(node) >= TILE_MARGIN_M)
+
+    def may_drop(node):
+        tile = node_tiles[node]
+        if counts[tile] <= 1:
+            return False
+        return depth(node) < TILE_MARGIN_M or deep[tile] > 1
+
+    def drop(node):
+        tile = node_tiles[node]
+        counts[tile] -= 1
+        if depth(node) >= TILE_MARGIN_M:
+            deep[tile] -= 1
+
     i = 1
     while i < len(path) - 1:
-        if path[i - 1] == path[i + 1] and counts[node_tiles[path[i]]] > 1:
-            counts[node_tiles[path[i]]] -= 1
-            counts[node_tiles[path[i + 1]]] -= 1
+        if path[i - 1] == path[i + 1] and may_drop(path[i]) and may_drop(path[i + 1]):
+            drop(path[i])
+            drop(path[i + 1])
             del path[i:i + 2]
             i = max(i - 1, 1)
         else:
@@ -499,7 +525,7 @@ def _route_details(graph, leg_cache, index, start_node, sequence, min_m, max_m, 
             node: lon_lat_tile(graph.nodes[node]["x"], graph.nodes[node]["y"])
             for node in node_path
         }
-        node_path = _trim_spurs(node_tiles, node_path)
+        node_path = _trim_spurs(graph, node_tiles, node_path)
         length_m = path_length_m(graph, node_path)
         if length_m <= max_m or not sequence:
             break
@@ -735,7 +761,8 @@ def plan_tile_loop(graph, start_lat, start_lon, target_km, tolerance_km, candida
             "coordinates": details["coordinates"],
             "directions": route_directions(graph, details["node_path"],
                                            target_tiles=collected,
-                                           waypoint_tiles=waypoints),
+                                           waypoint_tiles=waypoints,
+                                           coordinates=details["coordinates"]),
             "benefit": details["benefit"],
             "repeated_km": round(details["repeated_m"] / 1000, 2),
             # merky kvality, podle kterych se trasa vybrala - v UI je videt, co
