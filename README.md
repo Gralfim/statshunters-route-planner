@@ -587,6 +587,7 @@ pytest -m slow         # kontrolní měření na skutečném grafu Prahy (~1 min
 | `tests/test_static_cache.py` | statické soubory nesou `Cache-Control: no-cache` a zároveň validátory pro 304 |
 | `tests/test_expedition.py` | časové okno běhu (doběh a jízda ho zkracují, 24minutový strop na spojení), jednosměrný tvar dá širší okno, práh pro blízké cíle, odhad sklizně |
 | `tests/test_graph_cache.py` | cache připraveného grafu: zneplatnění při změně parametrů, round-trip, úklid starých otisků, odolnost proti poškozenému souboru |
+| `tests/test_transit_schedule.py` | jízdní řád z GTFS: varianta z jiného období nenafoukne interval, linku popisuje ta varianta, která opravdu jede, zkrácený spoj se nestane tváří linky, výjimky z `calendar_dates.txt`, expirace feedu a platnost cache grafu |
 | `tests/test_trails.py` | značené trasy: plánovaná i „doporučená" cyklotrasa se zahodí, existující přežije i s dírou (`complete=no`), turistických se filtr netýká; selhání stahování se nezapamatuje (disk ani paměť) a zkusí se všechna zrcadla |
 | `tests/test_objective.py` | cílová funkce: skóre nikdy nepřeroste přínos ani nespadne pod nulu, symetrie penalizace délky, váha klidu i značené trasy umí přehodit vítěze; výběr variant (vítěz první, skoro stejné se sloučí) |
 
@@ -637,7 +638,36 @@ v panelu; čistý okruh bez MHD je vždy jednou z porovnávaných variant.
    úplně — běhy se plánují přes den. Časy jízdy
    z jízdních řádů (reprezentativní spoj každé linky a směru); čekání = **polovina
    intervalu linky** pro daný typ dne (všední den / víkend, medián rozestupů odjezdů
-   z GTFS calendar, ořez 1–20 min). Kromě intervalu se ukládá i **počet spojů**:
+   z GTFS calendar, ořez 1–20 min).
+   Jízdní řád se skládá pro **konkrétní referenční středu a sobotu**, ne pro „všechny
+   středy, které jsou v datech". PID vede souběžně několik variant téže linky (běžný
+   provoz, výluka, prázdniny), každou s vlastním `service_id` a vlastní platností.
+   Když se čtou jen příznaky dnů a meze platnosti se ignorují, spoje ze všech období
+   se sečtou dohromady — a to lže dvakrát:
+   - **Interval vyjde zlomkový.** U S6 týž vlak existuje jako běžná varianta ze Smíchova
+     (5:16, 5:46, …) i jako výluková ze Zlíchova (5:18, 5:48, …). Rozestupy se pak
+     střídají 2 – 28 – 2 – 28 a medián sáhne po těch dvouminutových: **interval 2,5 min
+     místo 30**, čekání 1,2 min místo 15. Změřeno na feedu 18.–31. 7. 2026: ze 1517
+     kombinací linka+směr bylo takto zkresleno 14 (dále 191: 3 vs 12 min, 172: 5 vs 30).
+     Ostatní se zachránily náhodou — jejich duplicitní varianty mají shodné časy
+     a nulové rozestupy filtr v `_median_headway` zahodí.
+   - **Linku popisuje varianta, která nejede.** Reprezentativní spoj se bral ten, na který
+     se narazilo první, takže itinerář posílal běžce na Smíchov, ačkoli od 7. 7. vlak jede
+     ze Zlíchova. Teď se vybírá **nejdelší z platných** spojů (přednost má všední den) —
+     zkrácený spoj by linku připravil o kus sítě.
+
+   Čte se proto i `start_date`/`end_date` a **`calendar_dates.txt`** (výjimky na konkrétní
+   den: 1 = spoj navíc, 2 = odřeknutý), který se dřív neotvíral vůbec. Vedlejší efekt
+   výběru nejdelšího spoje: síť vzrostla ze 14 tis. na 15,9 tis. zastávek a z 25 tis.
+   na 32 tis. hran. Stavba grafu 5,8 → 11 s (dva průchody přes `stop_times.txt`), zato
+   jednou za feed.
+   **Feed se hlídá na expiraci.** `feed_info.txt` má platnost jen pár týdnů (18.–31. 7.);
+   dřív se stahovalo, jen když soubor vůbec neexistoval, takže plánovač jel na půl měsíce
+   starém řádu — i s výlukou, která se mezitím změnila. `refresh_gtfs` stáhne nový feed,
+   jakmile tomu starému skončila platnost; když se to nepovede, jede se dál na starém,
+   ale **s varováním na stderr** a s referenčními dny přitlačenými dovnitř jeho platnosti.
+   Graf v cache platí, dokud stojí na feedu ležícím na disku a jeho referenční dny nejsou
+   v minulosti. Kromě intervalu se ukládá i **počet spojů**:
    linka, která v daný typ dne nejede, se přeskočí úplně; linka s jediným spojem
    denně dostane strop čekání (dřív spadla na paušál podle druhu dopravy a router
    ji nabízel, jako by jezdila každých 12 minut).

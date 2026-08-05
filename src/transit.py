@@ -5,17 +5,22 @@ dopravnich prostredku (metro > tramvaj > vlak > ostatni). Casy jizdy pochazeji
 z jizdnich radu (reprezentativni spoj kazde linky a smeru), cekani na spoj je
 polovina intervalu linky pro dany typ dne (vsedni den / vikend, z GTFS
 calendar); kde interval neni znamy, pouzije se pausal podle druhu dopravy.
+
+Cely jizdni rad se sklada pro JEDNU konkretni stredu a JEDNU sobotu - viz
+REFERENCE_WEEKDAY. Feed se pritom hlida na expiraci (viz refresh_gtfs).
 """
 import csv
+import datetime
 import heapq
 import io
 import itertools
 import json
 import math
 import statistics
+import sys
 import urllib.request
 import zipfile
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 _GOAL = object()  # virtualni cilovy uzel (viz TransitNetwork.route)
@@ -24,7 +29,24 @@ ROOT = Path(__file__).resolve().parents[1]
 GTFS_ZIP = ROOT / "data" / "pid_gtfs.zip"
 GRAPH_CACHE = ROOT / "data" / "transit_graph.json"
 GTFS_URL = "https://data.pid.cz/PID_GTFS.zip"
-GRAPH_VERSION = 4
+GRAPH_VERSION = 5
+
+# Jizdni rad se stavi na KONKRETNI referencni dny, ne na "vsechny stredy, ktere
+# v datech jsou". PID vede soubezne nekolik variant teze linky (bezny provoz,
+# vyluka, prazdniny) a kazda ma vlastni service_id s vlastni platnosti. Kdyz se
+# ctou jen priznaky dnu v calendar.txt a platnost se ignoruje, spoje ze vsech
+# obdobi se sectou dohromady:
+#   * u S6 tim vysel interval 2,5 minuty misto 30 - tyz vlak je v datech
+#     dvakrat (bezna varianta a vylukova) a lisi se o 2 minuty, takze median
+#     rozestupu sahne po techto dvouminutovych parech misto po skutecnych 30;
+#   * jako reprezentativni spoj se vybrala predvylukova varianta ze Smichova,
+#     ackoli od 7. 7. 2026 jezdi ze Zlichova.
+# Zmereno na feedu 18.-31. 7. 2026: ze 1517 kombinaci linka+smer bylo takto
+# zkresleno 14 (S6 nejvic, pak 191: 3 vs 12 min a 172: 5 vs 30 min). Ostatni se
+# zachranily nahodou - jejich duplicitni varianty maji shodne casy a nulove
+# rozestupy filtr v _median_headway zahodi.
+REFERENCE_WEEKDAY = 2   # streda (datetime.date.weekday())
+REFERENCE_WEEKEND = 5   # sobota
 
 # GTFS route_type -> nas druh dopravy
 MODES = {0: "tram", 1: "metro", 2: "train", 3: "bus"}
@@ -73,6 +95,100 @@ def _read_csv(zip_file, name):
         yield from csv.DictReader(io.TextIOWrapper(raw, encoding="utf-8-sig"))
 
 
+def _date(text):
+    return datetime.date(int(text[:4]), int(text[4:6]), int(text[6:8]))
+
+
+def feed_window(gtfs_zip=GTFS_ZIP):
+    """(zacatek, konec) platnosti feedu, nebo None. PID vydava jizdni rad na
+    par tydnu dopredu - po konci platnosti uz nepopisuje skutecny provoz."""
+    try:
+        with zipfile.ZipFile(gtfs_zip) as zip_file:
+            for row in _read_csv(zip_file, "feed_info.txt"):
+                start, end = row.get("feed_start_date"), row.get("feed_end_date")
+                if start and end:
+                    return _date(start), _date(end)
+    except Exception:
+        pass
+    return None
+
+
+def refresh_gtfs(today=None):
+    """Stahne GTFS, kdyz chybi nebo uz mu skoncila platnost.
+
+    Drive se stahovalo jen kdyz soubor vubec neexistoval, takze planovac jel
+    na libovolne starem jizdnim radu - namereno pul mesice po konci platnosti,
+    tedy i s vylukou, ktera se mezitim zmenila. Kdyz se stazeni nepovede a nejaky
+    feed uz mame, jede se dal na nem, ale s varovanim.
+    """
+    today = today or datetime.date.today()
+    if GTFS_ZIP.exists():
+        window = feed_window()
+        if window is None or today <= window[1]:
+            return
+        stale = f"platnost skoncila {window[1].isoformat()}"
+    else:
+        stale = "chybi"
+    try:
+        download_gtfs()
+    except Exception as error:
+        if not GTFS_ZIP.exists():
+            raise
+        print(f"VAROVANI: PID GTFS se nepodarilo aktualizovat ({error}) - jede se "
+              f"na starem jizdnim radu ({stale})", file=sys.stderr)
+
+
+def _reference_dates(zip_file, today=None):
+    """Konkretni streda a sobota, na kterych jizdni rad stoji.
+
+    Bere nejblizsi takovy den ode dneska. Kdyz uz je za koncem platnosti feedu
+    (aktualizace se nepovedla), posledni takovy uvnitr platnosti - stary rad je
+    porad lepsi nez zadny."""
+    today = today or datetime.date.today()
+    window = None
+    for row in _read_csv(zip_file, "feed_info.txt"):
+        if row.get("feed_start_date") and row.get("feed_end_date"):
+            window = (_date(row["feed_start_date"]), _date(row["feed_end_date"]))
+            break
+
+    dates = []
+    for weekday in (REFERENCE_WEEKDAY, REFERENCE_WEEKEND):
+        day = today + datetime.timedelta(days=(weekday - today.weekday()) % 7)
+        if window and day > window[1]:
+            last = window[1]
+            day = last - datetime.timedelta(days=(last.weekday() - weekday) % 7)
+        dates.append(day)
+    return tuple(dates)
+
+
+WEEKDAY_COLUMNS = ("monday", "tuesday", "wednesday", "thursday", "friday",
+                   "saturday", "sunday")
+
+
+def _active_services(zip_file, dates):
+    """service_id -> (jede v prvni referencni den, jede v druhy).
+
+    Krome priznaku dne se ctou i meze platnosti a vyjimky z calendar_dates.txt
+    (1 = spoj navic v tento den, 2 = odrekly) - bez nich se michaji varianty
+    z ruznych obdobi."""
+    keys = [day.strftime("%Y%m%d") for day in dates]
+    active = {}
+    for row in _read_csv(zip_file, "calendar.txt"):
+        start, end = row["start_date"], row["end_date"]
+        active[row["service_id"]] = tuple(
+            row.get(WEEKDAY_COLUMNS[day.weekday()]) == "1" and start <= key <= end
+            for day, key in zip(dates, keys)
+        )
+    for row in _read_csv(zip_file, "calendar_dates.txt"):
+        if row["date"] not in keys:
+            continue
+        # sluzba muze byt jen v calendar_dates.txt (jednorazovy provoz)
+        days = list(active.get(row["service_id"], (False,) * len(dates)))
+        days[keys.index(row["date"])] = row["exception_type"] == "1"
+        active[row["service_id"]] = tuple(days)
+    return active
+
+
 def _is_technical_stop(stop_id):
     """PID znaci technicke kolejove body (kilometrovniky, hranice kraju,
     'Pha hl.n. Lc...') prefixem T + cislo; bezne zastavky maji prefix U.
@@ -92,10 +208,13 @@ def _median_headway(departures):
     return min(round(statistics.median(gaps), 1), 60.0)
 
 
-def build_transit_graph(gtfs_zip=GTFS_ZIP):
+def build_transit_graph(gtfs_zip=GTFS_ZIP, today=None):
     """Z GTFS postavi kompaktni graf: zastavky + hrany po sobe jdoucich zastavek
     reprezentativniho spoje kazde (linka, smer) + intervaly linek pro vsedni den
-    a vikend (median rozestupu odjezdu z vychozi zastavky). Cachuje do JSON."""
+    a vikend (median rozestupu odjezdu z vychozi zastavky). Cachuje do JSON.
+
+    Vsechno se bere z jednoho konkretniho vsedniho dne a jedne soboty
+    (viz REFERENCE_WEEKDAY) - varianty linek platne v jinem obdobi se ignoruji."""
     zip_file = zipfile.ZipFile(gtfs_zip)
 
     routes = {}
@@ -110,49 +229,60 @@ def build_transit_graph(gtfs_zip=GTFS_ZIP):
             "mode": MODES.get(route_type, "other"),
         }
 
-    # service_id -> (jede ve vsedni den, jede v sobotu)
-    service_days = {}
-    for row in _read_csv(zip_file, "calendar.txt"):
-        service_days[row["service_id"]] = (
-            row.get("wednesday") == "1",
-            row.get("saturday") == "1",
-        )
+    dates = _reference_dates(zip_file, today)
+    active = _active_services(zip_file, dates)
 
     trip_key = {}
-    trip_service = {}
+    trip_days = {}
     for row in _read_csv(zip_file, "trips.txt"):
-        if row["route_id"] in routes:
-            trip_id = row["trip_id"]
-            trip_key[trip_id] = (row["route_id"], row.get("direction_id") or "0")
-            trip_service[trip_id] = row.get("service_id")
+        if row["route_id"] not in routes:
+            continue
+        days = active.get(row.get("service_id"))
+        if not days or not any(days):
+            continue    # varianta pro jine obdobi - do dnesniho radu nepatri
+        trip_key[row["trip_id"]] = (row["route_id"], row.get("direction_id") or "0")
+        trip_days[row["trip_id"]] = days
 
-    representative = {}
-    sequences = {}
+    # Prvni pruchod: odjezd z vychozi zastavky (pro intervaly) a pocet zastavek
+    # (pro vyber reprezentanta).
     first_departure = {}
+    stop_count = Counter()
     for row in _read_csv(zip_file, "stop_times.txt"):
         trip_id = row["trip_id"]
-        key = trip_key.get(trip_id)
-        if key is None or _is_technical_stop(row["stop_id"]):
+        if trip_id not in trip_key or _is_technical_stop(row["stop_id"]):
             continue
-
+        stop_count[trip_id] += 1
         sequence = int(row["stop_sequence"])
         known = first_departure.get(trip_id)
         if known is None or sequence < known[0]:
-            first_departure[trip_id] = (sequence, _parse_gtfs_time(row["departure_time"] or row["arrival_time"]))
+            first_departure[trip_id] = (
+                sequence, _parse_gtfs_time(row["departure_time"] or row["arrival_time"]))
 
-        if representative.setdefault(key, trip_id) != trip_id:
-            continue
-        sequences.setdefault(trip_id, []).append(
-            (sequence, row["stop_id"], _parse_gtfs_time(row["arrival_time"]))
-        )
+    # Reprezentativni spoj urcuje, ktere zastavky linka obsluhuje - vybira se
+    # nejdelsi z platnych, a prednost ma vsedni den. Drive to byl ten, na ktery
+    # se narazilo prvni: mohla to byt varianta z jineho obdobi (odtud "vlak ze
+    # Smichova" behem vyluky) nebo zkraceny spoj, kteremu chybi pulka zastavek.
+    best = {}
+    for trip_id, key in trip_key.items():
+        rank = (trip_days[trip_id][0], stop_count[trip_id])
+        if key not in best or rank > best[key][0]:
+            best[key] = (rank, trip_id)
+    representative = {key: trip_id for key, (_rank, trip_id) in best.items()}
+
+    wanted = set(representative.values())
+    sequences = defaultdict(list)
+    for row in _read_csv(zip_file, "stop_times.txt"):
+        trip_id = row["trip_id"]
+        if trip_id in wanted and not _is_technical_stop(row["stop_id"]):
+            sequences[trip_id].append(
+                (int(row["stop_sequence"]), row["stop_id"], _parse_gtfs_time(row["arrival_time"]))
+            )
 
     # intervaly: odjezdy vsech spoju linky+smeru z vychozi zastavky podle typu dne
     departures = defaultdict(lambda: ([], []))
     for trip_id, (_seq, dep_min) in first_departure.items():
-        days = service_days.get(trip_service.get(trip_id))
-        if days is None:
-            continue
         weekday_deps, weekend_deps = departures[trip_key[trip_id]]
+        days = trip_days[trip_id]
         if days[0]:
             weekday_deps.append(dep_min)
         if days[1]:
@@ -190,19 +320,51 @@ def build_transit_graph(gtfs_zip=GTFS_ZIP):
                 round(float(row["stop_lon"]), 6),
             ]
 
-    graph = {"version": GRAPH_VERSION, "stops": stops, "edges": edges, "headways": headways}
+    graph = {"version": GRAPH_VERSION, "stops": stops, "edges": edges,
+             "headways": headways, "feed": _feed_identity(gtfs_zip),
+             "built_for": [day.isoformat() for day in dates]}
     GRAPH_CACHE.write_text(json.dumps(graph), encoding="utf-8")
     return graph
 
 
-def load_transit_graph():
-    if GRAPH_CACHE.exists():
-        graph = json.loads(GRAPH_CACHE.read_text(encoding="utf-8"))
-        if graph.get("version") == GRAPH_VERSION:
+def _feed_identity(gtfs_zip=GTFS_ZIP):
+    """Cim se pozna, ze na disku lezi jiny feed nez ten, ze ktereho je graf.
+    Velikost souboru staci - PID vydava kazdy feed zvlast."""
+    window = feed_window(gtfs_zip)
+    return [window[0].isoformat(), window[1].isoformat(),
+            Path(gtfs_zip).stat().st_size] if window else None
+
+
+def _graph_matches_feed(graph, gtfs_zip=GTFS_ZIP, today=None):
+    """Graf plati, dokud stoji na feedu, ktery lezi na disku.
+
+    Referencni dny se navic musi hodit na dnesek - postaveny "na pristi stredu"
+    zestarne, jakmile ta streda projde. U prosleho feedu to neplati: tam uz jsou
+    referencni dny pritlacene dovnitr stare platnosti a prestavba by nic
+    nezmenila, jen by bezela pri kazdem volani."""
+    if graph.get("feed") != _feed_identity(gtfs_zip):
+        return False
+    today = today or datetime.date.today()
+    window = feed_window(gtfs_zip)
+    if window and today > window[1]:
+        return True
+    built = graph.get("built_for") or []
+    return bool(built) and all(datetime.date.fromisoformat(day) >= today for day in built)
+
+
+def load_transit_graph(today=None):
+    today = today or datetime.date.today()
+    refresh_gtfs(today)
+    if GRAPH_CACHE.exists() and GTFS_ZIP.exists():
+        try:
+            graph = json.loads(GRAPH_CACHE.read_text(encoding="utf-8"))
+        except Exception:
+            graph = {}
+        if graph.get("version") == GRAPH_VERSION and _graph_matches_feed(graph, today=today):
             return graph
     if not GTFS_ZIP.exists():
         download_gtfs()
-    return build_transit_graph()
+    return build_transit_graph(today=today)
 
 
 # Barvy prazskeho metra - v mape maji byt ty, ktere ma clovek spojene s linkou,

@@ -597,16 +597,6 @@ def plan_expedition(start_lat, start_lon, target_km, tolerance_km, budget_min, p
             break
     best["variants"] = variants
     best["route"].pop("variants", None)
-    best["alternatives"] = [
-        {
-            "alight": candidate["alight"]["name"],
-            "transit_min": candidate["connection"]["minutes"],
-            "transfers": candidate["connection"]["transfers"],
-            "benefit_estimate": round(candidate["harvest"], 1),
-            "lines": [leg["line"] for leg in candidate["connection"]["legs"]],
-        }
-        for candidate in candidates[:6]
-    ]
     best["budget_min"] = budget_min
     best["pace_min_per_km"] = pace
     best["day"] = day

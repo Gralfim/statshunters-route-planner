@@ -923,15 +923,12 @@ function renderSegments(expedition) {
     }
   }
 
-  const alternatives = (expedition.alternatives || [])
-    .slice(0, 4)
-    .map(alt => `${alt.alight} (${alt.lines.join('+')}, ${alt.transit_min} min, prinos ~${Math.round(alt.benefit_estimate)})`)
-    .join('<br>');
-
+  // Zadne "dalsi smery" - odmitnuti kandidati se nabizeli jen jako text s odhadem
+  // prinosu, zatimco prepinac variant nad panelem nabizi tytez smery hotove
+  // a klikatelne (viz renderVariants).
   routeSegments.innerHTML = `<strong>Vyprava ${expedition.total_min} min / rozpocet ${expedition.budget_min} min`
     + `${expedition.within_budget ? '' : ' (PRES ROZPOCET!)'} - beh celkem ${expedition.run_km} km</strong><br>`
-    + lines.map((line, index) => `${index + 1}. ${line}`).join('<br>')
-    + (alternatives ? `<br><br>Dalsi smery:<br>${alternatives}` : '');
+    + lines.map((line, index) => `${index + 1}. ${line}`).join('<br>');
   routeSegments.hidden = false;
 }
 
