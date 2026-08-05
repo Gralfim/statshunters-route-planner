@@ -6,6 +6,7 @@ cachuje stejne velkoryse jako pesi graf (pokryti + rezerva).
 """
 import json
 import math
+import sys
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -27,11 +28,37 @@ MAJOR_STREET_CLASSES = {"primary", "secondary", "tertiary"}
 
 # Znacene trasy (KCT, cyklotrasy) jsou v OSM relace - osmnx features je nevraci,
 # proto primy dotaz na Overpass.
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+OVERPASS_MIRRORS = (
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+)
+
+
+class SourceUnavailable(Exception):
+    """Zdroj se nepodarilo stahnout. Ma vlastni typ, aby se nedal splest
+    s prazdnym vysledkem - prazdny vysledek se cachuje, selhani ne."""
+
 TRAIL_COLORS = {
     "red": "cervena", "blue": "modra", "green": "zelena", "yellow": "zluta",
     "white": "bila", "black": "cerna", "orange": "oranzova", "purple": "fialova",
 }
+
+# Cyklotrasy nesou v OSM stav a prazska sit je vedena DVOJMO: vedle relace
+# skutecne trasy existuje relace navrhu. `state=proposed` je planovana trasa,
+# `state=recommended` doporucena - tedy doporuceni cyklokoordinatora, v terenu
+# NEZNACENE. Bez filtru posila itinerar bezce po znaceni, ktere neexistuje.
+# Zmereno na 405 cyklorelacich v okoli Prahy: 38 proposed, 232 recommended,
+# 135 skutecnych. Vsech 100 tras s prefixem X ("klidova alternativa", X13 se
+# jmenuje doslova "Klidova alternativa bud. A13") je recommended, stejne jako
+# A135 nebo A235. U 53 cisel filtr necha skutecnou verzi a zahodi jen dvojce
+# "navrh" (A1, A13, A120).
+# Turistickych tras se to netyka - `state` nepouzivaji vubec (113 ze 113
+# relaci), a taky jsou v CR znacene spolehlive.
+UNSIGNED_ROUTE_STATES = {"proposed", "recommended"}
+# Verze v nazvu cache: stazena data nesou uz jen popisky, ne stav relace,
+# takze filtr na starou cache nedosahne - musi se stahnout znovu. Pomlcka,
+# ne podtrzitko: nazev souboru se parsuje pres split("_").
+TRAILS_CACHE = "trails-v2"
 
 EARTH_RADIUS_M = 6371000.0
 
@@ -101,27 +128,36 @@ def _extract_lines(features, label_fn):
     return lines
 
 
+def _features(ox, lat, lon, dist, tags):
+    """Geometrie z osmnx, nebo None kdyz v okoli zadne nejsou.
+
+    Rozlisuje "nic tam neni" od "nepodarilo se stahnout": prvni je platny
+    vysledek (osmnx hlasi InsufficientResponseError), druhe vyjimka, aby se
+    neuplny vysledek nezapsal do cache jako hotovy.
+    """
+    from osmnx._errors import InsufficientResponseError
+
+    try:
+        return ox.features_from_point((lat, lon), tags=tags, dist=dist)
+    except InsufficientResponseError:
+        return None
+    except Exception as error:
+        raise SourceUnavailable(f"osmnx {sorted(tags)}: {error}") from error
+
+
 def build_barriers(lat, lon, reach_km):
     import osmnx as ox
 
     ox.settings.cache_folder = str(BARRIER_DIR / "osmnx_cache")
     dist = max(reach_km, MIN_DOWNLOAD_REACH_KM) * 1000
     lines = []
-
-    try:
-        water = ox.features_from_point(
-            (lat, lon), tags={"waterway": ["river", "stream", "canal"]}, dist=dist
-        )
+    water = _features(ox, lat, lon, dist, {"waterway": ["river", "stream", "canal"]})
+    if water is not None:
         lines += _extract_lines(water, lambda row: _text(row.get("name"), "vodni tok"))
-    except Exception:
-        pass
-
-    try:
-        rail = ox.features_from_point((lat, lon), tags={"railway": ["rail"]}, dist=dist)
+    rail = _features(ox, lat, lon, dist, {"railway": ["rail"]})
+    if rail is not None:
         # nazvy trati jsou nepouzitelne ("kolej 102", "Tunel II") - genericky popis
         lines += _extract_lines(rail, lambda row: "žel. trať")
-    except Exception:
-        pass
 
     path = _cache_path("barriers", lat, lon, max(reach_km, MIN_DOWNLOAD_REACH_KM))
     path.write_text(json.dumps(lines), encoding="utf-8")
@@ -135,8 +171,8 @@ def build_streets(lat, lon, reach_km):
     ox.settings.cache_folder = str(BARRIER_DIR / "osmnx_cache")
     dist = max(reach_km, MIN_DOWNLOAD_REACH_KM) * 1000
     lines = []
-    try:
-        features = ox.features_from_point((lat, lon), tags={"highway": STREET_CLASSES}, dist=dist)
+    features = _features(ox, lat, lon, dist, {"highway": STREET_CLASSES})
+    if features is not None:
         named = features[features["name"].notna()] if "name" in features.columns else features.iloc[:0]
         for geometry, name, highway in zip(named.geometry, named["name"], named.get("highway", "")):
             label = _text(name)
@@ -145,8 +181,6 @@ def build_streets(lat, lon, reach_km):
             major = str(highway) in MAJOR_STREET_CLASSES
             for _, coords in _iter_lines(geometry, label):
                 lines.append([label, major, coords])
-    except Exception:
-        pass
 
     path = _cache_path("streets", lat, lon, max(reach_km, MIN_DOWNLOAD_REACH_KM))
     path.write_text(json.dumps(lines, ensure_ascii=False), encoding="utf-8")
@@ -162,41 +196,66 @@ def _trail_label(tags):
         czech = TRAIL_COLORS.get(colour.lower())
         return f"{czech} turisticka" if czech else "turisticka znacka"
     if route == "bicycle":
+        if _text(tags.get("state"), "") in UNSIGNED_ROUTE_STATES:
+            return None
+        if _text(tags.get("complete"), "") == "proposed":
+            return None
         ref = _text(tags.get("ref"))
         return f"cyklotrasa {ref}" if ref else "cyklotrasa"
     return None
 
 
+def _overpass(query):
+    """Odpoved Overpassu, nebo vyjimka. Zkousi se vic zrcadel: hlavni server
+    pod zatezi vraci 504 a jedno selhani nesmi pripravit trasu o znacky."""
+    last = None
+    for url in OVERPASS_MIRRORS:
+        try:
+            request = urllib.request.Request(
+                url,
+                data=urllib.parse.urlencode({"data": query}).encode(),
+                headers={"User-Agent": "statshunters-route-planner"},
+            )
+            with urllib.request.urlopen(request, timeout=240) as response:
+                return json.load(response).get("elements", [])
+        except Exception as error:      # 504, timeout, docasny vypadek zrcadla
+            last = error
+    raise SourceUnavailable(f"Overpass neodpovedel ({last})") from last
+
+
 def build_trails(lat, lon, reach_km):
-    """Znacene turisticke a cyklo trasy jako [[label, [[lon,lat],...]], ...]."""
+    """Znacene turisticke a cyklo trasy jako [[label, [[lon,lat],...]], ...].
+
+    Pri selhani stahovani vyhazuje SourceUnavailable - vysledek se NESMI ulozit
+    do cache. Drive se chyba spolkla a do cache se zapsal prazdny seznam, takze
+    jedno 504 od Overpassu pripravilo celou oblast o znacene trasy natrvalo
+    (a protoze znacka zlevnuje hrany, zmenilo to i navrzenou trasu).
+    """
     dist = int(max(reach_km, MIN_DOWNLOAD_REACH_KM) * 1000)
+    # Ctverec, ne `around:`. Vyhledani relaci podle vzdalenosti je pro Overpass
+    # rad drazsi nez bbox - na 12 km kolem Prahy vracela vsechna zrcadla 504,
+    # tyz dotaz pres bbox dobehne za 7 s. Ctverec je nadmnozina kruhu a znacky
+    # se stejne prirazuji geometricky, takze prebytek nevadi.
+    dlat = dist / 111320.0
+    dlon = dist / (111320.0 * math.cos(math.radians(lat)))
+    bbox = f"{lat - dlat:.5f},{lon - dlon:.5f},{lat + dlat:.5f},{lon + dlon:.5f}"
     query = (
-        "[out:json][timeout:180];"
-        f"(relation[route~'^(hiking|foot|bicycle)$'](around:{dist},{lat},{lon}););"
+        f"[out:json][timeout:180][bbox:{bbox}];"
+        "(relation[route~'^(hiking|foot|bicycle)$'];);"
         "out geom;"
     )
     lines = []
-    try:
-        request = urllib.request.Request(
-            OVERPASS_URL,
-            data=urllib.parse.urlencode({"data": query}).encode(),
-            headers={"User-Agent": "statshunters-route-planner"},
-        )
-        with urllib.request.urlopen(request, timeout=240) as response:
-            elements = json.load(response).get("elements", [])
-        for element in elements:
-            label = _trail_label(element.get("tags", {}))
-            if not label:
+    for element in _overpass(query):
+        label = _trail_label(element.get("tags", {}))
+        if not label:
+            continue
+        for member in element.get("members", []):
+            geometry = member.get("geometry")
+            if member.get("type") != "way" or not geometry or len(geometry) < 2:
                 continue
-            for member in element.get("members", []):
-                geometry = member.get("geometry")
-                if member.get("type") != "way" or not geometry or len(geometry) < 2:
-                    continue
-                lines.append([label, [[round(p["lon"], 6), round(p["lat"], 6)] for p in geometry]])
-    except Exception:
-        pass
+            lines.append([label, [[round(p["lon"], 6), round(p["lat"], 6)] for p in geometry]])
 
-    path = _cache_path("trails", lat, lon, max(reach_km, MIN_DOWNLOAD_REACH_KM))
+    path = _cache_path(TRAILS_CACHE, lat, lon, max(reach_km, MIN_DOWNLOAD_REACH_KM))
     path.write_text(json.dumps(lines, ensure_ascii=False), encoding="utf-8")
     return lines
 
@@ -207,7 +266,13 @@ _CACHE_MEMORY = {}
 def _load_cached(prefix, builder, lat, lon, reach_km):
     path = _covering_cache_path(prefix, lat, lon, reach_km)
     if path is None:
-        data = builder(lat, lon, reach_km)
+        try:
+            data = builder(lat, lon, reach_km)
+        except SourceUnavailable as error:
+            # Planovani pokracuje bez tohoto zdroje, ale nezapamatuje si to -
+            # ani na disk, ani do pameti. Priste se zkusi znovu.
+            print(f"VAROVANI: {prefix} se nepodarilo stahnout: {error}", file=sys.stderr)
+            return []
         _CACHE_MEMORY[str(_cache_path(prefix, lat, lon, max(reach_km, MIN_DOWNLOAD_REACH_KM)))] = data
         return data
     if str(path) not in _CACHE_MEMORY:
@@ -224,7 +289,7 @@ def load_streets(lat, lon, reach_km):
 
 
 def load_trails(lat, lon, reach_km):
-    return _load_cached("trails", build_trails, lat, lon, reach_km)
+    return _load_cached(TRAILS_CACHE, build_trails, lat, lon, reach_km)
 
 
 def line_segments(lines):

@@ -404,6 +404,66 @@ Jak to funguje:
      hranice úseku není důvod uvádět Legerovu dvakrát po sobě.
    - **Žádné prázdné pokyny**: změna názvu ulice bez zatočení není pokyn. Dřív se
      hlásila jako „rovne" a tvořila polovinu řádků itineráře.
+   - **Rozhodovací body** — místa, kde se dá zabloudit, i když se nemění název cesty.
+     Řádky vznikají změnou popisu úseku, takže zatáčka *uvnitř* úseku (nebo taková,
+     jejíž krátký úsek pohltilo slučování) beze stopy mizela: na referenční trase mělo
+     40 kroků jen 18 pokynů, přitom zatáček na křižovatkách je 134. Dvě věci to musely
+     ustát:
+     1. **směr se vyhlazuje přes ~50 m** — jednotlivá hrana v síti chodníků (přechod,
+        obejití rohu) jinak vypadá jako zatáčka;
+     2. **sousední detekce se shlukují** — uzly jsou po ~39 m, takže jednu zatáčku hlásí
+        několik uzlů za sebou (i po vyhlazení jich zbylo 90).
+
+     S obojím a s podmínkou, že z uzlu vede ještě jiná cesta (kde se nedá odbočit, není
+     co splést), vychází **28 pokynů na 15 km (1,9/km)** — 18 u kroků a 10 uvnitř.
+     Bod u hranice úseku se nehlásí dvakrát: patří pokynu kroku. Naopak když krok pokyn
+     nemá a rozhodovací bod na jeho začátku je, pokyn se doplní — přechod na jinou cestu
+     bez výrazného zatočení je právě to, co se snadno přejede.
+   - **Odstupňování odboček**: 35–60° „mírně vlevo", 60–120° „vlevo", 120–150° „ostře
+     vlevo", nad 150° „zpět". Dřív se mírný ohyb a vlásenka četly stejně.
+   - **Slučování úseků nesmí spolknout ulici, po které se běží.** Krok vzniká změnou popisu
+     a krátké kroky se slučují se sousedem — jenže popis přebíral **pohlcující** krok, takže
+     se úsek jmenoval podle ulice, na kterou trasa teprve najede. Naměřeno na výpravě do
+     Zbuzan: „mírně vlevo **Do Vršku**" ve skutečnosti znamenalo 162 m po Ořešské a teprve
+     pak vpravo do Do Vršku; „vlevo **Mezi Lány**" začínalo 36 m po U Opatrovny; „vlevo
+     **Plzeňská**" 188 m předtím. Kdo se tím řídí, hledá odbočku, která tam ještě není.
+     Tři příčiny, všechny opravené:
+     1. **Slučování nepřekročí rozhodovací bod** — jinak odbočka zmizí i s názvem ulice
+        před ní. Proto se rozhodovací body hledají ještě před slučováním.
+     2. **Krátká bezejmenná mezera se zaceluje** (`STEP_GAP_MAX_M`). Pět metrů bez názvu
+        rozdělilo Ořešskou (163 m) na 81 + 77 m, obojí pod prahem — a slučování ji celou
+        rozebralo do sousedů.
+     3. **Prahy podle naměřeného rozložení**: pojmenovaný úsek se pohlcuje až pod **30 m**
+        (dřív 100 m), nepojmenovaný pod **50 m** (dřív 250 m). Data z té výpravy ukazují
+        čistou dělicí čáru — skutečné úseky mají 36–163 m (U Opatrovny, U Tyršovy školy,
+        Ořešská), šum 4–9 m (Puchmajerova, Walterovo náměstí, Peroutkova); u bezejmenných
+        jsou spojky do 43 m a pak skok na 70 m a výš — proto 50 m (85 m polní cesty před Mládkovou
+        se při prahu 100 m pořád ztrácelo).
+
+     Cena: itinerář se na 14,6 km rozrostl z 38 řádků na 56 — každý řádek ale nese ulici,
+     po které se opravdu běží. Slučováním souvislé informace (níže) se pak vrátil na **40**
+     (2,7 na km), tentokrát bez lží.
+   - **Souvislá informace se neroztrhává.** Pravdivé popisky vyrobily opačnou vadu:
+     jeden běh po žluté značce zabral sedm řádků podle názvů ulic, kterých si na značené
+     cestě nikdo nevšimne. Tři pravidla, každé měřené na výpravě do Zbuzan:
+     1. **Turistická značka je primární popis** — v ČR jsou značené trasy spolehlivě
+        vyznačené v terénu, takže kdo běží po žluté, sleduje značky, ne cedule s názvy
+        ulic. Navazující kroky po téže značce (`TRAIL_JOIN_SHARE`, 50 % délky kroku) se
+        slučují a **ulice se přesunou do poznámky** („zluta turisticka (Pod Vavřincem,
+        Mezi Lány, Radlická)", 1,15 km v jednom řádku místo sedmi). Cyklotrasy takhle
+        popisovat nejde — značené jsou nespolehlivě, takže si nechávají názvy ulic.
+        Značka **bez barvy** („turisticka znacka") se zahazuje úplně (`UNUSABLE_TRAILS`):
+        jiné než barevné značky a naučné stezky u nás neexistují, generický popisek
+        vzniká z relací bez `osmc:symbol` a jen mate (hlásil se podél Peroutkovy).
+     2. **Chodník a pěšina podél téže ulice jsou jeden úsek** — mění se charakter cesty,
+        ne kudy se běží (Novoveská 7,8–8,6 km z pěti řádků na jeden; Peroutkova 10,3–11,8 km).
+     3. **Cesta, která se na chvíli přiblíží ulici, se nedělí** — souběžnost je náhodná.
+        Aby se z ní ale nestal název celého úseku, sleduje se `own_m`: metry, kde hrana
+        měla **vlastní** `name`. Krok, který ulici jen míjí, název nepřebírá (pěšina
+        u Jitrocelové 5,6–6,5 km: pět řádků na dva, popis zůstal „pesina").
+   - **Čas** se u kroku uvádí **kumulativně** od startu (podle tempa z panelu), stejně
+     jako kilometráž — v jedné stupnici se to čte líp než směs „od startu" a „na tomhle
+     úseku".
    - **Sběr dlaždic** — kvůli čemu se celý běh dělá. U kroku, kde trasa do cílové
      dlaždice vjede, se uvádí která, od kolika km, kolik kilometrů je uvnitř a
      **jak hluboko od hranice** se dostane. Hloubka rozhoduje, jestli se návštěva
@@ -421,11 +481,53 @@ Jak to funguje:
      přiblíží se k němu, druhý klik zvýraznění zruší. Souřadnice kroků se neposílají —
      dopočítají se v prohlížeči z kumulativní vzdálenosti, kterou už počítá odečet
      vzdálenosti po trase.
+   - **Značka platí jen tam, kde opravdu vede.** Značená trasa se ke kroku připisovala,
+     když pokrývala aspoň 30 % jeho délky — takže úsek, kde zelená v polovině odbočí jinam,
+     byl celý označený jako zelená. To je nebezpečné: běžec se řídí značkami a odbočí s nimi.
+     Naměřeno na výpravě do Zbuzan: zelená pokrývala 295 m ze 670metrového úseku (44 %).
+     Když značka nepokrývá aspoň 90 % kroku, uvádí se **úsek, po kterém vede**
+     („zelena turisticka jen 4.9–5.2 km"). Dělit kroky podle značky nešlo — 26 z 54 kroků
+     má značek víc (cyklotrasy se překrývají) a itinerář by se zdvojnásobil.
+     Rozcestí se pak hlásí až **za** místem, kde značka odbočí pryč; do té doby vede běžce
+     ona. A shlukují se stejně jako odbočky, jinak jedno rozcestí hlásí několik uzlů za
+     sebou (na jednom úseku jich vyskočilo sedm).
    - **Značené trasy**: turistické a cyklotrasy jsou v OSM **relace**, které osmnx
-     features nevrací — stahují se přímo z Overpass (`build_trails`, 443 relací /
-     31 tis. úseků pro Prahu za ~4 s) a přiřazují hranám stejným mechanismem jako
+     features nevrací — stahují se přímo z Overpass (`build_trails`, 536 relací /
+     21 tis. úseků pro Prahu za ~7 s) a přiřazují hranám stejným mechanismem jako
      ulice (atribut `trail`). V itineráři se uvádí barva značky („cervena
      turisticka") nebo číslo cyklotrasy („cyklotrasa A22").
+     **Neznačené cyklotrasy se zahazují** (`UNSIGNED_ROUTE_STATES`). Pražská síť je
+     v OSM vedena dvojmo: vedle relace skutečné trasy stojí relace návrhu, rozlišené
+     tagem `state` — `proposed` je plánovaná, `recommended` doporučená
+     (tj. doporučení cyklokoordinátora, **v terénu neznačené**). Bez filtru posílal
+     itinerář běžce po značení, které neexistuje. Naměřeno na 405 cyklorelacích
+     v okolí Prahy: 38 `proposed`, 232 `recommended`, 135 skutečných. Všech 100 tras
+     s prefixem **X** („klidová alternativa"; X13 se jmenuje doslova „Klidová
+     alternativa bud. A13") je `recommended`, stejně jako A135 nebo A235; u 53 čísel
+     filtr nechá skutečnou verzi a zahodí jen dvojče „návrh" (A1, A13, A120).
+     `complete=no` se nezahazuje — to je díra v trase, ne chybějící značení.
+     Turistických tras se filtr netýká: `state` nepoužívají vůbec (113 ze 113 relací)
+     a v ČR jsou značené spolehlivě — proto se dají použít jako primární popis.
+     Dopad na datech (10 km kolem centra): cyklo úseky **24 941 → 15 412**,
+     tras **252 → 106**, turistických úseků beze změny (6 082 → 6 085). U A13
+     zbylo 11 úseků ze 166 — přesně ta „odbočka na Výtoni", kterou OSM uvádí
+     v poznámce jako jediný vyznačený kus. Trasa se tím i posunula (14,59 → 14,66 km):
+     značka zlevňuje hrany, takže plánovač předtím trasu stáčel na neexistující
+     cyklostezky.
+   - **Dotaz je bbox, ne `around:`.** Hledání relací podle vzdálenosti je pro Overpass
+     řádově dražší — na 12 km kolem Prahy vracela **všechna** zrcadla 504, týž dotaz
+     přes bbox doběhne za 7 s. Čtverec je nadmnožina kruhu a značky se přiřazují
+     geometricky, takže přebytek nevadí.
+   - **Selhání zdroje se nikdy nezapamatuje.** Dřív se výjimka spolkla (`except
+     Exception: pass`) a do cache se zapsal prázdný seznam — jedno 504 od Overpassu
+     tím připravilo celou oblast o značené trasy **natrvalo**, a protože značka
+     zlevňuje hrany, měnilo to i navrhované trasy. Chyba stahování má teď vlastní typ
+     (`SourceUnavailable`), plánování pokračuje bez toho zdroje, **vypíše varování
+     na stderr** a neuloží nic — ani na disk, ani do paměti procesu. Totéž o patro
+     výš: degradovaný graf se neukládá do pickle cache (`_prepare` vrací i příznak
+     úplnosti). Raději pomalá příprava pokaždé než tiše horší výsledky. „V okolí nic
+     není" se od výpadku odlišuje: osmnx to hlásí `InsufficientResponseError` a to je
+     platný výsledek, který se cachovat smí.
    - **Rozcestí**: na **neznačených polních cestách a pěšinách** se hlásí každé
      rozcestí s kilometráží a pokynem „drž se vlevo/vpravo" (tam hrozí navigační
      chyba). Na chodnících v zástavbě se nehlásí (byly by desítky na kilometr)
@@ -476,7 +578,7 @@ pytest -m slow         # kontrolní měření na skutečném grafu Prahy (~1 min
 | `tests/test_metrics.py` | max square a max cluster (4-sousednost, díry, prázdná množina) |
 | `tests/test_scoring.py` | pořadí vah priorit, neaditivita zisků nad množinou, square vážený plochou, strop staleness |
 | `tests/test_cost_model.py` | pořadí preferencí typů cest + kontext: chodník podél rušné ulice prohrává s klidnou ulicí, značka je bonus, kontext hranu nikdy nezlevní |
-| `tests/test_itinerary.py` | kilometráž kroků i orientačních bodů, souběžná ulice není křížení, deduplikace napříč kroky, žádné „rovne"; sběr dlaždic (hloubka průniku, každý sběr právě jednou) |
+| `tests/test_itinerary.py` | kilometráž kroků i orientačních bodů, souběžná ulice není křížení, deduplikace napříč kroky, žádné „rovne"; sběr dlaždic (hloubka průniku, každý sběr právě jednou), odstupňování odboček, rozhodovací body; slučování nesmí spolknout ulici (zacelení mezer, prahy úseků), rozsah platnosti značky |
 | `tests/test_route_quality.py` | *(slow)* podíl délky podél významných ulic a klidných cest, dodržení tolerance, konzistence kilometráže na reálné trase |
 | `tests/test_basemap.py` | zdroj API klíče (env > config), fallback na OSM bez klíče, placeholdery v URL dlaždic |
 | `tests/test_trim_spurs.py` | ořez ocásků: hluboká špička přežije, mělká se ořízne, trasa zůstane souvislá |
@@ -485,6 +587,7 @@ pytest -m slow         # kontrolní měření na skutečném grafu Prahy (~1 min
 | `tests/test_static_cache.py` | statické soubory nesou `Cache-Control: no-cache` a zároveň validátory pro 304 |
 | `tests/test_expedition.py` | časové okno běhu (doběh a jízda ho zkracují, 24minutový strop na spojení), jednosměrný tvar dá širší okno, práh pro blízké cíle, odhad sklizně |
 | `tests/test_graph_cache.py` | cache připraveného grafu: zneplatnění při změně parametrů, round-trip, úklid starých otisků, odolnost proti poškozenému souboru |
+| `tests/test_trails.py` | značené trasy: plánovaná i „doporučená" cyklotrasa se zahodí, existující přežije i s dírou (`complete=no`), turistických se filtr netýká; selhání stahování se nezapamatuje (disk ani paměť) a zkusí se všechna zrcadla |
 | `tests/test_objective.py` | cílová funkce: skóre nikdy nepřeroste přínos ani nespadne pod nulu, symetrie penalizace délky, váha klidu i značené trasy umí přehodit vítěze; výběr variant (vítěz první, skoro stejné se sloučí) |
 
 Rychlé testy běží nad **ručně postavenými grafy** (`line_graph` fixture v `conftest.py`) —
@@ -622,18 +725,21 @@ v cenách hran a čtyři vady itineráře (viz „Plánování tras", body 5 a 6
    „Výběr z variant" níže. Zbývá případně měrka stínu (`natural=wood`, `landuse=forest`)
    a vody, aby šlo varianty popsat i podle nich — zatím se popisují délkou, přínosem,
    podílem po značkách a podél rušných ulic a rozhodnutí je na uživateli.
-4. **Itinerář na rozhodovacích bodech.** Dnes vzniká řádek na každou změnu názvu cesty —
-   běžec potřebuje řádek tam, kde se dá zabloudit, plus průběžné potvrzovací záchytné body.
-   Na referenční trase je ~109 ostrých odboček na křižovatkách proti 21 pokynům; slučování
-   krátkých úseků (`STEP_MIN_M`) navíc rozhodovací body maže. Přidat odstupňování odbočky
-   („mírně/ostře" — dnes je 35–150° všechno stejné „vlevo") a čas úseku podle tempa.
+4. ~~Itinerář na rozhodovacích bodech.~~ **Hotovo (07/2026):** viz „Itinerář běhu" výše —
+   rozhodovací body uvnitř úseků (18 → 28 pokynů), odstupňování odboček a kumulativní čas.
+   Zbývá případně to, co jsem si u tohoto bodu původně sliboval a nedodal: **průběžné
+   potvrzovací záchytné body** („po 2 km stále po značce, minul jsi rybník") pro dlouhé
+   úseky bez pokynu.
 5. ~~Dlaždice v itineráři.~~ **Hotovo (07/2026):** viz „Itinerář běhu" výše. Odhalilo to
    dva defekty, oba opravené: ořez slepých ocásků ubíral hloubku průniku do dlaždice
    (viz bod 4 v „Plánování tras") a sběr se měřil po uzlech místo po geometrii trasy.
-6. **Popisky, které nelžou.** Nepojmenovaný chodník dědí název souběžné ulice do 40 m, takže
-   „Bělehradská" může být pěšina v parku vedle ní; `_vote_step_name` pojmenuje krok ulicí
-   pokrývající jen 40 % délky; `absorb` neaktualizuje `named`/`kind`, takže se pohlcený úsek
-   může vydávat za jiný typ cesty (a `kind` řídí hlášení rozcestí).
+6. ~~Popisky, které nelžou.~~ **Hotovo (08/2026):** viz „Itinerář běhu" výše. Krok se
+   nejmenuje podle ulice, na kterou trasa teprve najede; značka platí jen tam, kde vede;
+   souběžná ulice název nepřebírá (`own_m`) a souvislá informace se neroztrhává.
+   Ověřeno proti reálu na výpravě do Zbuzan — uživatel prošel itinerář krok po kroku a
+   žádný pokyn už nesvádí na špatnou cestu.
+   Zbývá drobnost: značka končící uprostřed kroku se hlásí rozsahem („zelena turisticka
+   jen 4,9–5,2 km") místo toho, aby krok rozdělila v místě, kde odbočí pryč.
 7. ~~Rozdělit `src/routing.py` a přidat cache připraveného grafu.~~ **Hotovo (07/2026):**
    1 254řádkový `routing.py` je rozdělený na `geo` / `runcost` / `waygraph` / `routeplan` /
    `itinerary` (viz tabulka struktury) a připravený graf se cachuje do pickle. Ověřeno

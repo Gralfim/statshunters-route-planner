@@ -199,14 +199,34 @@ def test_quiet_weight_avoids_busy_streets(slider_ends):
     )
 
 
-def test_quiet_weight_seeks_marked_trails(slider_ends):
-    """Duvod, proc do cilove funkce pribyl clen za znacene trasy: bez nej
-    posuvnik jen ubiral posledni metry chodniku u magistraly a trasa se timhle
-    smerem temer nemenila."""
+def quality(route, quiet_weight):
+    """Jakostni cast cilove funkce - obe penalizace, ktere posuvnik ovlada."""
+    from routeplan import TRAIL_PENALTY_FRACTION
+
+    off_trail = 1.0 - route["trail_share"]
+    return ((1 - quiet_weight * route["along_major_share"])
+            * (1 - quiet_weight * TRAIL_PENALTY_FRACTION * off_trail))
+
+
+def test_quiet_end_wins_on_its_own_objective(slider_ends):
+    """Posuvnik musi trasu skutecne zlepsit v tom, co sam meri.
+
+    Drive se tu tvrdilo, ze plny klid da VIC metru po znackach nez nulovy. To
+    cilova funkce neslibuje a od chvile, kdy se zahazuji neznacene cyklotrasy,
+    to ani neplati: clen za znacky je penalizace za beh MIMO ne, takze u trasy,
+    ktera po znackach vede z ctvrtiny, funguje skoro jako konstanta, zatimco
+    clen za vyznamne ulice rozlisuje silne. Nameren tento obchod (08/2026):
+    z Karlova namesti 11,3 % -> 1,4 % podel hlavnich ulic pri 4,3 % -> 3,7 %
+    po znackach, z Prokopskeho udoli 16,7 % -> 2,9 % pri 27,0 % -> 23,4 %.
+    Slozeny efekt je v obou pripadech jasne kladny - a to je to, co se ma drzet.
+    Ze znacka sama o sobe skore zvedne, hlida test_objective.
+    """
     quiet, loud = slider_ends[1.0], slider_ends[0.0]
-    assert quiet["trail_share"] >= loud["trail_share"], (
-        f"plny klid dal {100*quiet['trail_share']:.1f} % po znackach, "
-        f"nulovy {100*loud['trail_share']:.1f} %"
+    assert quality(quiet, 1.0) > quality(loud, 1.0), (
+        f"plny klid: {100*quiet['along_major_share']:.1f} % hlavnich ulic / "
+        f"{100*quiet['trail_share']:.1f} % znacek -> {quality(quiet, 1.0):.3f}; "
+        f"nulovy: {100*loud['along_major_share']:.1f} % / "
+        f"{100*loud['trail_share']:.1f} % -> {quality(loud, 1.0):.3f}"
     )
 
 

@@ -36,7 +36,7 @@ TRAIL_MATCH_MAX_M = 35.0
 
 # Zvys, kdyz se zmeni SAMA LOGIKA pripravy (novy atribut, jiny zpusob parovani).
 # Zmenu parametru nize hlida otisk sam.
-PREPARED_CACHE_VERSION = 1
+PREPARED_CACHE_VERSION = 2  # 2: cyklotrasy bez znaceni v terenu se zahazuji
 
 
 def graph_path(lat, lon, reach_km):
@@ -137,7 +137,11 @@ def enrich_streets(graph, lat, lon, reach_km):
                     extra=(segments[4], "along_major"))
 
     trails = landmarks.load_trails(lat, lon, reach_km)
-    if trails:
+    if not trails:
+        # zadne znacene trasy = bud jich tu neni, nebo zdroj vypadl; graf se pak
+        # necachuje (viz _prepare), aby se degradace nezafixovala
+        graph.graph["sources_complete"] = False
+    else:
         _match_parallel(graph, walkable, walkable_mids, walkable_owns,
                         landmarks.line_segments(trails), TRAIL_MATCH_MAX_M, "trail",
                         candidates=20)
@@ -145,14 +149,23 @@ def enrich_streets(graph, lat, lon, reach_km):
 
 
 def _prepare(graph, lat, lon, reach_km):
-    # Poradi je podstatne: ceny hran ctou kontext (along_major, trail), ktery
-    # doplnuje az obohaceni. Kdyz obohaceni selze, ceny vyjdou jen z typu cesty.
+    """Doplni grafu kontext a ceny hran. Vraci (graf, uplny?).
+
+    Kdyz nektery zdroj vypadne, planovani pokracuje - jen z typu cesty. Takovy
+    graf se ale NESMI ulozit do cache: jedno 504 od Overpassu by tim pripravilo
+    oblast o znacene trasy natrvalo a menilo i navrhovane trasy (znacka zlevnuje
+    hrany). Radeji pomala priprava pokazde nez tise horsi vysledky.
+    """
+    complete = True
     try:
         enrich_streets(graph, lat, lon, reach_km)
     except Exception:
         graph.graph.setdefault("street_segments", None)
+        complete = False
+    if not graph.graph.get("sources_complete", True):
+        complete = False
     prepare_run_costs(graph)
-    return graph
+    return graph, complete
 
 
 def _preparation_fingerprint():
@@ -227,16 +240,18 @@ def load_walk_graph(lat, lon, reach_km):
         )
         path = graph_path(lat, lon, download_reach)
         ox.save_graphml(graph, path)
-        _prepare(graph, lat, lon, download_reach)
-        _store_prepared(path, graph)
+        _, complete = _prepare(graph, lat, lon, download_reach)
+        if complete:
+            _store_prepared(path, graph)
         _GRAPH_MEMORY[str(path)] = graph
         return graph
 
     if str(path) not in _GRAPH_MEMORY:
         graph = _load_prepared(path)
         if graph is None:
-            graph = _prepare(ox.load_graphml(path), lat, lon, reach_km)
-            _store_prepared(path, graph)
+            graph, complete = _prepare(ox.load_graphml(path), lat, lon, reach_km)
+            if complete:
+                _store_prepared(path, graph)
         _GRAPH_MEMORY[str(path)] = graph
     return _GRAPH_MEMORY[str(path)]
 

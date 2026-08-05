@@ -223,3 +223,211 @@ def test_pickup_is_measured_along_the_route_geometry(line_graph):
     pickup = [t for s in steps for t in s["tiles"]][0]
     assert pickup["at_km"] > 0, "vjezd nesmi vyjit na zacatku trasy - uzel 'a' je mimo"
     assert pickup["km"] > 0
+
+
+# --- rozhodovaci body a odstupnovani odbocek ---
+
+def test_turn_words_are_graded():
+    """Bez odstupnovani se mirny ohyb 40 st a vlasenka 140 st cetly stejne."""
+    from itinerary import _turn_word
+
+    assert _turn_word(0, 20) is None            # ohyb cesty, ne zatacka
+    assert _turn_word(0, 45) == "mirne vpravo"
+    assert _turn_word(0, 90) == "vpravo"
+    assert _turn_word(0, 130) == "ostre vpravo"
+    assert _turn_word(0, 170) == "zpet"
+
+
+def test_turn_words_tell_the_sides_apart():
+    from itinerary import _turn_word
+
+    assert _turn_word(0, 90) == "vpravo"
+    assert _turn_word(0, 270) == "vlevo"
+    assert _turn_word(90, 180) == "vpravo"
+
+
+def test_straight_route_has_no_decision_points(straight_route):
+    """Rovna trasa: neni kde zabloudit, i kdyz z uzlu B vede bocni ulice."""
+    graph, path = straight_route
+    assert all(step["decisions"] == [] for step in route_directions(graph, path))
+
+
+def test_bend_without_alternative_gives_no_instruction(line_graph):
+    """Zatacka, ze ktere se neda odbocit jinam, neni rozhodovaci bod."""
+    from itinerary import _decision_points
+
+    nodes = {"a": (50.0, 14.40), "b": (50.0, 14.41), "c": (50.01, 14.41)}
+    graph = line_graph(nodes, [("a", "b", {}), ("b", "c", {})])
+    cumulative = [0.0, 700.0, 1800.0]
+    assert _decision_points(graph, ["a", "b", "c"], cumulative) == []
+
+
+def test_bend_with_an_alternative_is_a_decision_point(line_graph):
+    """Tataz zatacka, ale z uzlu vede jeste jina cesta - tam uz se splest da."""
+    from itinerary import _decision_points
+
+    nodes = {"a": (50.0, 14.40), "b": (50.0, 14.41), "c": (50.01, 14.41),
+             "d": (50.0, 14.42)}
+    graph = line_graph(nodes, [("a", "b", {}), ("b", "c", {}), ("b", "d", {})])
+    cumulative = [0.0, 700.0, 1800.0]
+    points = _decision_points(graph, ["a", "b", "c"], cumulative)
+    assert len(points) == 1
+    assert points[0]["turn"]
+
+
+# --- popisky nesmi lhat o tom, kde ulice zacina ---
+
+def labels_of(graph, path):
+    return [step["label"] for step in route_directions(graph, path)]
+
+
+def chain(line_graph, pieces):
+    """Rovny retez uzlu; pieces = [(delka_m, nazev_nebo_None), ...]."""
+    nodes, edges, lon = {}, [], 14.4
+    nodes["n0"] = (LAT, lon)
+    for index, (length, name) in enumerate(pieces):
+        lon += length * LON_PER_M
+        nodes[f"n{index + 1}"] = (LAT, lon)
+        data = {"length": float(length)}
+        if name:
+            data["name"] = name
+        edges.append((f"n{index}", f"n{index + 1}", data))
+    return line_graph(nodes, edges), [f"n{i}" for i in range(len(pieces) + 1)]
+
+
+def test_short_gap_does_not_split_a_street(line_graph):
+    """Par metru bez nazvu (prechod, spojka) rozdelilo ulici na dva kratke kroky
+    a slucovani je pak rozebralo do sousedu - ulice z popisu zmizela. Mereno:
+    Oresska 163 m rozseknuta 5metrovym utrzkem na 81 + 77 m."""
+    graph, path = chain(line_graph, [(81, "Oresska"), (5, None), (77, "Oresska"),
+                                     (150, "Do Vrsku")])
+    assert labels_of(graph, path) == ["Oresska", "Do Vrsku"]
+
+
+def test_street_you_actually_run_along_keeps_its_row(line_graph):
+    """Krok se nesmi jmenovat podle ulice, na kterou trasa teprve najede."""
+    graph, path = chain(line_graph, [(200, "Pod Vavrincem"), (36, "U Opatrovny"),
+                                     (250, "Mezi Lany")])
+    assert labels_of(graph, path) == ["Pod Vavrincem", "U Opatrovny", "Mezi Lany"]
+
+
+def test_brushing_a_corner_is_still_noise(line_graph):
+    """Par metru na rohu ulice zustava sumem - jinak by itinerar mel radek na
+    kazdou krizovatku (mereno: Puchmajerova 5 m, Walterovo namesti 7 m)."""
+    graph, path = chain(line_graph, [(300, "Radlicka"), (7, "Walterovo namesti"),
+                                     (300, "Radlicka")])
+    assert "Walterovo namesti" not in labels_of(graph, path)
+
+
+def test_unnamed_stretch_is_not_renamed_after_the_next_street(line_graph):
+    """Dlouhy bezejmenny chodnik pred Plzenskou se nesmi jmenovat Plzenska."""
+    graph, path = chain(line_graph, [(69, None), (33, None), (79, None), (250, "Plzenska")])
+    labels = labels_of(graph, path)
+    assert labels[0] != "Plzenska"
+    assert "Plzenska" in labels
+
+
+# --- znacena trasa nesmi platit pro cely usek, kdyz odbocuje ---
+
+def marked(line_graph, pieces):
+    """Retez uzlu, kde kazdy usek muze nest znacku: (delka, nazev, znacka)."""
+    nodes, edges, lon = {}, [], 14.4
+    nodes["n0"] = (LAT, lon)
+    for index, (length, name, trail) in enumerate(pieces):
+        lon += length * LON_PER_M
+        nodes[f"n{index + 1}"] = (LAT, lon)
+        data = {"length": float(length)}
+        if name:
+            data["name"] = name
+        if trail:
+            data["trail"] = trail
+        edges.append((f"n{index}", f"n{index + 1}", data))
+    graph = line_graph(nodes, edges)
+    return graph, [f"n{i}" for i in range(len(pieces) + 1)]
+
+
+def test_trail_over_the_whole_step_needs_no_range(line_graph):
+    graph, path = marked(line_graph, [(300, "Lesni", "zelena turisticka"),
+                                      (300, "Lesni", "zelena turisticka")])
+    step = route_directions(graph, path)[0]
+    assert step["trail"] == "zelena turisticka"
+    assert step["trail_km"] is None
+
+
+def test_trail_that_leaves_mid_step_carries_its_range(line_graph):
+    """Kdyz itinerar pripise znacku celemu useku, ale ona v polovine odbocí,
+    bezec ji poslechne a odbocí taky. Mereno na vyprave do Zbuzan: zelena
+    pokryvala 295 m ze 670metroveho useku a byla uvedena pro cely."""
+    graph, path = marked(line_graph, [(300, "Lesni", "zelena turisticka"),
+                                      (400, "Lesni", None)])
+    step = route_directions(graph, path)[0]
+    assert step["trail"] == "zelena turisticka"
+    assert step["trail_km"] == [0.0, 0.3]
+
+
+def test_barely_present_trail_is_not_reported(line_graph):
+    graph, path = marked(line_graph, [(40, "Lesni", "zelena turisticka"),
+                                      (600, "Lesni", None)])
+    assert route_directions(graph, path)[0]["trail"] is None
+
+
+def test_absorbed_step_keeps_its_trail_in_order(line_graph):
+    """names/trails musi zustat zarovnane s uzly i pri slucovani dozadu -
+    jinak rozsah znacky ukazuje na spatne misto."""
+    graph, path = marked(line_graph, [(20, None, "zelena turisticka"),
+                                      (400, "Lesni", "zelena turisticka"),
+                                      (400, "Lesni", None)])
+    step = route_directions(graph, path)[0]
+    assert step["trail_km"][0] == 0.0
+
+
+# --- fragmentace: sousedni kroky s touz informaci ---
+
+def test_path_along_a_street_merges_with_the_street(line_graph):
+    """Pesina podel Novoveske a Novoveska sama jsou jeden usek - meni se jen
+    charakter cesty, ne kudy se bezi."""
+    graph, path = marked(line_graph, [(200, None, None), (600, "Novoveska", None)])
+    for _u, _v, data in graph.edges(data=True):
+        if not data.get("name"):
+            data["highway"], data["along_street"] = "path", "Novoveska"
+    assert labels_of(graph, path) == ["Novoveska"]
+
+
+def test_path_that_only_passes_a_street_keeps_its_own_description(line_graph):
+    """Pesina, ktera se na chvili priblizi Jitrocelove, zustava pesinou -
+    z nahodne soubeznosti se nesmi stat nazev useku."""
+    graph, path = marked(line_graph, [(300, None, None), (200, None, None),
+                                      (300, None, None)])
+    for index, (_u, _v, data) in enumerate(graph.edges(data=True)):
+        data["highway"] = "path"
+        if index in (2, 3):        # prostredni usek (obe orientace hrany)
+            data["along_street"] = "Jitrocelova"
+    labels = labels_of(graph, path)
+    assert labels == ["pesina"], labels
+
+
+def test_steps_on_the_same_hiking_trail_become_one(line_graph):
+    """V CR jsou turisticke znacky spolehlive - kdo bezi po zlute, sleduje
+    znacky, ne cedule s nazvy ulic. Mereno na vyprave do Zbuzan: zluta byla
+    roztristena do sedmi radku podle ulic."""
+    graph, path = marked(line_graph, [(300, "Pod Vavrincem", "zluta turisticka"),
+                                      (300, "Mezi Lany", "zluta turisticka"),
+                                      (300, "Radlicka", "zluta turisticka")])
+    steps = route_directions(graph, path)
+    assert [s["label"] for s in steps] == ["zluta turisticka"]
+    assert steps[0]["via"] == ["Pod Vavrincem", "Mezi Lany", "Radlicka"]
+
+
+def test_cycle_routes_do_not_swallow_street_names(line_graph):
+    """Cyklotrasy nejsou v terenu znacene tak spolehlive jako turisticke -
+    nazvy ulic zustavaji popisem."""
+    graph, path = marked(line_graph, [(300, "Prvni", "cyklotrasa A12"),
+                                      (300, "Druha", "cyklotrasa A12")])
+    assert [s["label"] for s in route_directions(graph, path)] == ["Prvni", "Druha"]
+
+
+def test_marking_without_a_colour_is_ignored(line_graph):
+    """V CR nejsou jine turisticke znacky nez barevne nebo naucne stezky -
+    genericka "turisticka znacka" pochazi z relaci bez osmc:symbol a jen mate."""
+    graph, path = marked(line_graph, [(400, "Peroutkova", "turisticka znacka")])
+    assert route_directions(graph, path)[0]["trail"] is None

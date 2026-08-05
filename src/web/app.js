@@ -546,13 +546,31 @@ function renderDirections(route) {
     return;
   }
 
+  // Cas se uvadi KUMULATIVNE stejne jako kilometraz - v jedne stupnici se cte
+  // lip nez smes "od startu" a "na tomhle useku".
+  const pace = Number(routePace.value) || 6;
+
   const rows = steps.map(step => {
     const turn = step.turn ? `<span class="turn">${step.turn}</span> ` : '';
     const steps_note = step.steps ? ' po schodech' : '';
     const bridge = step.bridge ? ' (most)' : '';
     const heading = step.start_heading ? ` <span class="dist">smer ${step.start_heading}</span>` : '';
-    const trail = step.trail ? ` <span class="trail">${step.trail}</span>` : '';
-    const at = `<span class="dist">${step.at_km.toFixed(1)} km</span>`;
+    // Znacka bez rozsahu vede po celem useku; s rozsahem jen po jeho casti -
+    // bez toho by bezec sledoval znacky i tam, kde uz odbocuji jinam.
+    const trail = step.trail
+      ? ` <span class="trail">${step.trail}${step.trail_km
+          ? ` jen ${step.trail_km[0].toFixed(1)}-${step.trail_km[1].toFixed(1)} km` : ''}</span>`
+      : '';
+    // ulice pod znackou - popis nese znacka, jmena jsou jen poznamka
+    const via = (step.via && step.via.length)
+      ? ` <span class="via">(${step.via.join(', ')})</span>` : '';
+    const at = `<span class="dist">${step.at_km.toFixed(1)} km</span>`
+      + `<span class="mins">${Math.round(step.at_km * pace)} min</span>`;
+    // rozhodovaci body uvnitr useku - beze zmeny nazvu cesty by zanikly
+    const decisions = (step.decisions && step.decisions.length)
+      ? `<div class="decision">${step.decisions.map(
+          d => `${d.at_km.toFixed(1)} km ${d.turn}`).join(' · ')}</div>`
+      : '';
     const cross = (step.crossings && step.crossings.length)
       ? `<div class="cross">${step.crossings.map(c => `${c.name} (${c.at_km.toFixed(1)} km)`).join(', ')}</div>`
       : '';
@@ -570,7 +588,7 @@ function renderDirections(route) {
         }).join('<br>')}</div>`
       : '';
     return `<li>${at} ${turn}${step.label}${trail}${steps_note}${bridge}${heading}`
-      + `${tiles}${cross}${forks}</li>`;
+      + `${decisions}${via}${tiles}${cross}${forks}</li>`;
   }).join('');
 
   const collected = steps.reduce((sum, step) => sum + (step.tiles || []).length, 0);
