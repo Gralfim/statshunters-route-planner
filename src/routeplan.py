@@ -16,8 +16,8 @@ from pathlib import Path
 from geo import haversine_m, tile_center
 from geojson import lon_lat_tile, tile_lon_lat
 from itinerary import route_directions
-from runcost import (along_major_m, best_edge, edge_id, path_length_m, repeated_m,
-                     route_weight, trail_m)
+from runcost import (along_major_m, best_edge, corridor_m, edge_id, path_length_m,
+                     repeated_m, route_weight, trail_m)
 from waygraph import load_walk_graph, nearest_node, node_index, path_coordinates
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,14 +31,23 @@ MAX_SQUARE_MISSING = 4
 IMPROVE_ROUNDS = 2
 IMPROVE_MOVES_PER_ROUND = 10
 # Cilova funkce trasy je prinos POSTUPNE SNIZOVANY ctyrmi merkami kvality:
-#   skore = prinos x (1 - REPEAT x podil opakovani)
+#   skore = prinos x (1 - CORRIDOR x podil delky v opakovanem koridoru)
 #                   x (1 - quiet_weight x podil delky podel vyznamnych ulic)
 #                   x (1 - quiet_weight x TRAIL x podil delky MIMO znacene trasy)
 #                   x (1 - LENGTH x odchylka delky / tolerance)
 # Vsechny jsou PODILOVE a nasobi prinos, takze prinos zustava dominantni ("prinos
 # king") a merky rozhoduji mezi jinak srovnatelnymi trasami. Absolutni penalizace
 # by delaly z nejkratsiho pripustneho okruhu vzdy vitezze.
-REPEAT_PENALTY_FRACTION = 0.5
+#
+# Opakovani se meri KORIDOREM (runcost.corridor_m), ne shodou hran. Trasa, ktera
+# jde udolim tam po jedne strane a zpet po druhe, ma opakovanych hran nula, a
+# pritom je porad na tomtez miste - `repeated_m` ten jev nezachyti (mereno pri
+# vaze klidu 1,0: opakovani 0-1 % z Karlova nam. i ze Zahradniho Mesta).
+# Koridor je nadmnozina: u presneho opakovani vyjde zhruba dvojnasobny, protoze
+# pocita oba pruchody. Proto je zlomek POLOVICNI proti drivejsimu REPEAT (0,5) -
+# na presne se opakujici trase trestá stejne jako predtim, navic ale vidi
+# soubezne vedeni. Penalizovat obojí by tentyz metr pocitalo dvakrat.
+CORRIDOR_PENALTY_FRACTION = 0.25
 # Podil delky vedouci podel vyznamnych ulic. Bez tohoto clenu neumel planovac
 # porovnat "hodne dlazdic po magistrale" s "min dlazdic po klidu" - vzal vzdy
 # prvni a druhou variantu ani nepostavil. Vaha je RUNTIME parametr (posuvnik
@@ -543,6 +552,7 @@ def _route_details(graph, leg_cache, index, start_node, sequence, min_m, max_m, 
         "benefit": evaluate_tile_set(crossed, context),
         "in_window": min_m <= length_m <= max_m,
         "repeated_m": repeated_m(graph, node_path),
+        "corridor_m": corridor_m(coordinates),
         "along_major_m": along_major_m(graph, node_path),
         "trail_m": trail_m(graph, node_path),
     }
@@ -583,13 +593,14 @@ def _variant_score(details, target_m, tolerance_m, quiet_weight):
     if length_m <= 0:
         return 0.0
 
-    repeat = min(details["repeated_m"] / length_m, 1.0)
+    # starsi details bez merky (z cache nebo z testu) se nesmi rozbit
+    corridor = min(details.get("corridor_m", 0.0) / length_m, 1.0)
     major = min(details["along_major_m"] / length_m, 1.0)
     off_trail = 1.0 - min(details.get("trail_m", 0.0) / length_m, 1.0)
     deviation = min(abs(length_m - target_m) / tolerance_m, 1.0) if tolerance_m > 0 else 0.0
 
     return (details["benefit"]["total"]
-            * (1 - REPEAT_PENALTY_FRACTION * repeat)
+            * (1 - CORRIDOR_PENALTY_FRACTION * corridor)
             * (1 - quiet_weight * major)
             * (1 - quiet_weight * TRAIL_PENALTY_FRACTION * off_trail)
             * (1 - LENGTH_PENALTY_FRACTION * deviation))
@@ -765,6 +776,8 @@ def plan_tile_loop(graph, start_lat, start_lon, target_km, tolerance_km, candida
                                            coordinates=details["coordinates"]),
             "benefit": details["benefit"],
             "repeated_km": round(details["repeated_m"] / 1000, 2),
+            "corridor_km": round(details["corridor_m"] / 1000, 2),
+            "corridor_share": round(details["corridor_m"] / length_m, 3),
             # merky kvality, podle kterych se trasa vybrala - v UI je videt, co
             # posuvnik "prinos <-> klid" udelal
             "along_major_km": round(details["along_major_m"] / 1000, 2),

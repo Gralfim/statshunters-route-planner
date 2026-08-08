@@ -10,6 +10,20 @@ je to prvni misto, kam sahnout.
 """
 from geo import tag
 
+EARTH_RADIUS_M = 6371000.0
+
+# Opakovani koridoru: kolik trasy vede blizko useku, ktery uz ma za sebou.
+# `repeated_m` vidi jen druhy pruchod TOUZ hranou, takze okruh, ktery jde udolim
+# tam po jedne strane a zpet po druhe (nebo po soubezne pesine), ma opakovani
+# nulove a pritom je porad na tomtez miste. Mereno na okruhu ze Zahradniho Mesta:
+# opakovani hran 0,0 %, koridor 1,3 % - to je presne ten jev, ktery hrana nevidi.
+CORRIDOR_RADIUS_M = 40.0
+# Dva pruchody se musi po TRASE lisit aspon o tuhle vzdalenost, jinak by se
+# hlasil kazdy ohyb: U-zatacka o polomeru 40 m ma oblouk jen ~125 m. Kratsi slepe
+# ocasky uz odrezava _trim_spurs pri stavbe trasy. Mereno na okruzich z Karlova
+# nam. i Zahradniho Mesta: mezi 300 a 800 m se vysledek nemeni.
+CORRIDOR_SEPARATION_M = 300.0
+
 # Preference typu cest pro beh (uzivatel 2026-07-19): cyklostezka > turisticka
 # cesta/pesina > park a pesi zona > chodnik > klidna silnice; rusne silnice
 # penalizovane, schody take.
@@ -155,6 +169,42 @@ def repeated_m(graph, node_path):
         best_edge(graph, u, v)["length"] * (count - 1)
         for (u, v), count in counts.items() if count > 1
     ))
+
+
+def corridor_m(coordinates, radius_m=CORRIDOR_RADIUS_M,
+               separation_m=CORRIDOR_SEPARATION_M):
+    """Metry trasy vedouci v koridoru, kterym uz trasa jednou prosla.
+
+    Pocitaji se OBA pruchody - "kolik behu se odehraje na mistech, ktera uvidim
+    dvakrat". `repeated_m` proti tomu zapocitava jen ten druhy, takze cisla nejsou
+    primo srovnatelna: u presneho opakovani vyjde koridor zhruba dvojnasobny
+    (mereno z Karlova nam.: opakovani 8,8 %, koridor 17,2 %).
+
+    Meri se geometricky na souradnicich trasy, ne po hranach - soubezna pesina je
+    jina hrana, a prave o tu tady jde.
+    """
+    import math
+
+    import numpy as np
+    from scipy.spatial import cKDTree
+
+    if len(coordinates) < 2:
+        return 0.0
+
+    lats = np.array([point[0] for point in coordinates])
+    lons = np.array([point[1] for point in coordinates])
+    scale = math.cos(math.radians(float(lats.mean())))
+    x = np.radians(lons - lons[0]) * EARTH_RADIUS_M * scale
+    y = np.radians(lats - lats[0]) * EARTH_RADIUS_M
+    steps = np.hypot(np.diff(x), np.diff(y))
+    travelled = np.concatenate([[0.0], np.cumsum(steps)])
+
+    inside = np.zeros(len(x), dtype=bool)
+    for i, j in cKDTree(np.column_stack([x, y])).query_pairs(radius_m):
+        if abs(travelled[i] - travelled[j]) >= separation_m:
+            inside[i] = inside[j] = True
+    # usek se pocita, kdyz v koridoru lezi oba jeho konce
+    return float(steps[inside[:-1] & inside[1:]].sum())
 
 
 def trail_m(graph, node_path):

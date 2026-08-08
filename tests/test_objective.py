@@ -6,14 +6,14 @@ o skutecny graf tu nejde.
 """
 import pytest
 
-from routeplan import (LENGTH_PENALTY_FRACTION, MAX_VARIANTS, REPEAT_PENALTY_FRACTION,
+from routeplan import (CORRIDOR_PENALTY_FRACTION, LENGTH_PENALTY_FRACTION, MAX_VARIANTS,
                        TRAIL_PENALTY_FRACTION, _distinct_variants, _variant_score)
 
 TARGET_M = 15000.0
 TOLERANCE_M = 3000.0
 
 
-def details(benefit=100.0, length_m=TARGET_M, repeated_m=0.0, along_major_m=0.0,
+def details(benefit=100.0, length_m=TARGET_M, corridor_m=0.0, along_major_m=0.0,
             trail_m=None):
     """Vychozi trasa je "bezvadna": na cili, bez opakovani, mimo vyznamne ulice
     a cela po znacenych trasach - takze si drzi cely prinos a jednotlive merky
@@ -21,7 +21,7 @@ def details(benefit=100.0, length_m=TARGET_M, repeated_m=0.0, along_major_m=0.0,
     return {
         "benefit": {"total": benefit},
         "length_m": length_m,
-        "repeated_m": repeated_m,
+        "corridor_m": corridor_m,
         "along_major_m": along_major_m,
         "trail_m": length_m if trail_m is None else trail_m,
     }
@@ -38,8 +38,8 @@ def test_clean_route_at_target_keeps_its_whole_benefit():
 def test_score_never_exceeds_the_benefit():
     """Merky prinos jen SNIZUJI - zadna kombinace nesmi trasu prehodnotit nad
     jeji skutecny zisk pro statistiky."""
-    for kwargs in ({}, dict(length_m=TARGET_M + 500), dict(repeated_m=2000),
-                   dict(along_major_m=3000), dict(along_major_m=TARGET_M, repeated_m=TARGET_M)):
+    for kwargs in ({}, dict(length_m=TARGET_M + 500), dict(corridor_m=2000),
+                   dict(along_major_m=3000), dict(along_major_m=TARGET_M, corridor_m=TARGET_M)):
         assert score(**kwargs) <= 100.0 + 1e-9
 
 
@@ -47,7 +47,7 @@ def test_score_never_goes_negative():
     """Nejhorsi mozna trasa pri maximalni vaze klidu."""
     worst = _variant_score(
         details(benefit=200.0, length_m=TARGET_M + TOLERANCE_M,
-                repeated_m=TARGET_M + TOLERANCE_M, along_major_m=TARGET_M + TOLERANCE_M),
+                corridor_m=TARGET_M + TOLERANCE_M, along_major_m=TARGET_M + TOLERANCE_M),
         TARGET_M, TOLERANCE_M, 1.0,
     )
     assert worst == 0.0
@@ -167,14 +167,21 @@ def test_trails_can_flip_the_winner():
     assert score(quiet_weight=1.0, **plain) < score(quiet_weight=1.0, **scenic)
 
 
-# --- opakovani ulic (chovani zachovane z drivejska) ---
+# --- opakovany koridor ---
 
-def test_repeated_streets_are_penalised():
-    assert score(repeated_m=0.3 * TARGET_M) < score(repeated_m=0.0)
+def test_running_the_same_corridor_twice_is_penalised():
+    assert score(corridor_m=0.3 * TARGET_M) < score(corridor_m=0.0)
 
 
-def test_fully_repeated_route_loses_the_whole_fraction():
-    assert score(repeated_m=TARGET_M) == pytest.approx(100.0 * (1 - REPEAT_PENALTY_FRACTION))
+def test_route_entirely_in_a_repeated_corridor_loses_the_whole_fraction():
+    assert score(corridor_m=TARGET_M) == pytest.approx(100.0 * (1 - CORRIDOR_PENALTY_FRACTION))
+
+
+def test_missing_corridor_measure_does_not_crash():
+    """Starsi details bez corridor_m (z cache nebo z testu) se nesmi rozbit."""
+    plain = {"benefit": {"total": 100.0}, "length_m": TARGET_M,
+             "along_major_m": 0.0, "trail_m": TARGET_M}
+    assert _variant_score(plain, TARGET_M, TOLERANCE_M, 0.6) == pytest.approx(100.0)
 
 
 # --- nabidka variant k vyberu ---
@@ -219,6 +226,6 @@ def test_route_without_edges_is_not_offered():
 
 def test_penalties_compose_multiplicatively():
     """Merky se nasobi, ne odcitaji - jinak by sesla dohromady zaporne skore."""
-    both = score(repeated_m=TARGET_M, along_major_m=TARGET_M, quiet_weight=0.5)
-    assert both == pytest.approx(100.0 * (1 - REPEAT_PENALTY_FRACTION) * (1 - 0.5))
+    both = score(corridor_m=TARGET_M, along_major_m=TARGET_M, quiet_weight=0.5)
+    assert both == pytest.approx(100.0 * (1 - CORRIDOR_PENALTY_FRACTION) * (1 - 0.5))
     assert both > 0

@@ -285,11 +285,11 @@ Jak to funguje:
    vylepšit přidáváním nevyužitých kandidátů (2 kola). Při přetečení tolerance
    odpadá nejslabší waypoint; naopak pokud trasa nedosáhne spodní hranice, dotáhne
    se přes další tiles v dosahu (`_extend_to_window`).
-3. **Cílová funkce** (`_variant_score`) — přínos postupně snižovaný třemi **podílovými**
+3. **Cílová funkce** (`_variant_score`) — přínos postupně snižovaný čtyřmi **podílovými**
    měrkami kvality:
 
    ```
-   skóre = přínos × (1 − 0,5  × podíl opakovaných ulic)
+   skóre = přínos × (1 − 0,25 × podíl délky v opakovaném koridoru)
                   × (1 − váha klidu × podíl délky podél významných ulic)
                   × (1 − váha klidu × 0,5 × podíl délky MIMO značené trasy)
                   × (1 − 0,35 × odchylka délky od cíle / tolerance)
@@ -360,10 +360,49 @@ Jak to funguje:
    Navíc se **penalizuje průchod stejnou ulicí**: hrana už použitá na trase se při
    plánování dalšího úseku zdraží, takže se okruh vrací jinudy. Nízkoopakovací
    varianty se počítají rovnou v portfoliu (top 3 seedy, `AVOID_VARIANTS`), ne až
-   jako oprava vítěze. Opakování je měkká složka cílové funkce: skóre = přínos ×
-   (1 − 0,5 × **podíl** opakovaných metrů). Podíl, ne absolutní kilometry — s
-   absolutní penalizací vycházel vždy nejlevněji nejkratší přípustný okruh.
-   Míra vyhýbání je laditelná konstantou `REPEAT_PENALTY_FRACTION`.
+   jako oprava vítěze. Přirážka opakovaným hranám (`REUSE_PENALTY`) zůstává **na
+   hranách** — tam jde o konkrétní ulici, kterou má plánovač objet.
+
+   V cílové funkci se ale opakování měří **koridorem, ne shodou hran**
+   (`runcost.corridor_m`). Shoda hran vidí jen druhý průchod *toutéž* cestou —
+   okruh, který jde údolím tam po jedné straně a zpět po druhé (nebo po souběžné
+   pěšině), má opakovaných ulic nula a přitom je pořád na tomtéž místě. Naměřeno
+   ze Zahradního Města: opakování hran **0,1 %**, koridor **21,5 %**; při plné váze
+   klidu dokonce opakování 46,7 % proti koridoru **92,3 %** — trasa tam a zpět.
+   Měří se geometricky ze souřadnic trasy: bod leží v opakovaném koridoru, když je
+   do `CORRIDOR_RADIUS_M` (40 m) od bodu vzdáleného **po trase** aspoň
+   `CORRIDOR_SEPARATION_M` (300 m). Odstup po trase je nutný, jinak by se hlásil
+   každý ohyb — U-zatáčka o poloměru 40 m má oblouk jen ~125 m; kratší slepé ocásky
+   navíc odřezává `_trim_spurs` už při stavbě trasy. Mezi 300 a 800 m odstupu se
+   výsledek nemění, mezi 25 a 60 m poloměru také ne (nad 120 m už měrka začíná
+   hlásit i souběžné ulice v pravidelné síti).
+
+   **Počítají se oba průchody** — „kolik běhu strávím na místech, která uvidím
+   dvakrát" — kdežto `repeated_km` započítává jen ten druhý. Čísla proto nejsou
+   přímo srovnatelná: u přesného opakování vyjde koridor zhruba dvojnásobný
+   (z Karlova nám. opakování 8,8 %, koridor 17,2 %). Proto je zlomek
+   `CORRIDOR_PENALTY_FRACTION` **poloviční** (0,25) proti dřívějšímu
+   `REPEAT_PENALTY_FRACTION` (0,5): na přesně se opakující trase trestá stejně jako
+   dřív, navíc ale vidí souběžné vedení. Penalizovat obojí by tentýž metr počítalo
+   dvakrát. Ověřeno head-to-head proti staré funkci na šesti kombinacích
+   (2 starty × 3 polohy posuvníku): vítěz je ve všech shodný.
+
+   Kalibrace zlomku (naměřeno na týchž datech, u vítěze podíl koridoru a přínos):
+
+   | zlomek | Zahradní Město, klid 0,0 | Zahradní Město, klid 1,0 | Karlovo nám., klid 0,0 |
+   |---|---|---|---|
+   | 0,00 (bez penalizace) | 92,3 % *(299)* | 92,3 % *(299)* | 17,2 % *(125)* |
+   | **0,25 (nastaveno)** | **21,5 %** *(197)* | 92,3 % *(299)* | 17,2 % *(125)* |
+   | 0,40 | 21,5 % *(197)* | **8,8 %** *(197)* | **0,4 %** *(113)* |
+   | 0,75 | 8,8 % *(197)* | 8,8 % *(197)* | 0,4 % *(113)* |
+
+   Na 0,25 měrka odmítne trasu tam-a-zpět tam, kde je přínos srovnatelný, ale
+   nepřebije výrazně vyšší sběr — to je záměr („přínos king"). Kdo chce raději
+   pestřejší trasu i za cenu třetiny dlaždic, zvedne zlomek na 0,4. Při plné váze
+   klidu drží ten 92% okruh nad vodou člen za značené trasy (54 % délky po značkách
+   proti 29 % u alternativy) — údolím tam a zpět po značce je legitimní způsob běhu,
+   takže to není nutně vada. Měrka stojí ~1,2 s ze 17,7 s plánování (23 volání,
+   ~1 050 bodů na trasu).
 6. **Kontext cesty, ne jen její typ** — typ sám o sobě nestačí: v pěším grafu je
    přes 80 % délky `footway`, takže chodník podél čtyřproudé silnice vypadal stejně
    dobře jako pěšina v parku, a protože je levnější než klidná ulice (0,85 vs. 1,0),
@@ -587,6 +626,7 @@ pytest -m slow         # kontrolní měření na skutečném grafu Prahy (~1 min
 | `tests/test_static_cache.py` | statické soubory nesou `Cache-Control: no-cache` a zároveň validátory pro 304 |
 | `tests/test_expedition.py` | časové okno běhu (doběh a jízda ho zkracují, 24minutový strop na spojení), jednosměrný tvar dá širší okno, práh pro blízké cíle, odhad sklizně |
 | `tests/test_graph_cache.py` | cache připraveného grafu: zneplatnění při změně parametrů, round-trip, úklid starých otisků, odolnost proti poškozenému souboru |
+| `tests/test_corridor.py` | opakovaný koridor: rovná trasa nic nehlásí, tam-a-zpět počítá oba průchody, **souběžná pěšina se počítá, i když se neopakuje žádná hrana**, vzdálenější ulice ne, ohyb ani krátký slepý ocásek ne |
 | `tests/test_transit_schedule.py` | jízdní řád z GTFS: varianta z jiného období nenafoukne interval, linku popisuje ta varianta, která opravdu jede, zkrácený spoj se nestane tváří linky, výjimky z `calendar_dates.txt`, expirace feedu a platnost cache grafu |
 | `tests/test_trails.py` | značené trasy: plánovaná i „doporučená" cyklotrasa se zahodí, existující přežije i s dírou (`complete=no`), turistických se filtr netýká; selhání stahování se nezapamatuje (disk ani paměť) a zkusí se všechna zrcadla |
 | `tests/test_objective.py` | cílová funkce: skóre nikdy nepřeroste přínos ani nespadne pod nulu, symetrie penalizace délky, váha klidu i značené trasy umí přehodit vítěze; výběr variant (vítěz první, skoro stejné se sloučí) |
@@ -744,13 +784,11 @@ v cenách hran a čtyři vady itineráře (viz „Plánování tras", body 5 a 6
    varianty a váha klidu je posuvník v panelu (`quiet_weight`). Viz „Cílová funkce" výše.
    Zbývá případně: vystavit `LENGTH_PENALTY_FRACTION` a `QUIET_LEG_FACTOR` do `config.yaml`,
    jestli se ukáže potřeba je ladit jinde než v kódu.
-2. **Opakování koridoru, ne jen hrany.** `repeated_m` počítá druhý průchod **toutéž**
-   hranou. Trasa, která jde údolím tam po jedné straně a zpět po druhé (nebo po
-   souběžné pěšině), má opakování nulové a přitom vypadá jako pořád totéž — a při
-   vysoké váze klidu, kde je na výběr málo cest, se to děje. Naměřeno při váze 1,0:
-   opakování 0–1 % (Karlovo nám. i Zahradní Město), takže současná metrika ten jev
-   nezachytí. Chtělo by to měřit blízkost trasy k sobě samé (např. podíl délky, která
-   vede do X metrů od dřívějšího úseku), a teprve to dát do cílové funkce.
+2. ~~Opakování koridoru, ne jen hrany.~~ **Hotovo (08/2026):** viz „Plánování tras",
+   bod 5. Cílová funkce měří blízkost trasy k sobě samé (`corridor_m`) místo shody
+   hran; na okruhu ze Zahradního Města vidí 21,5 % tam, kde shoda hran viděla 0,1 %.
+   Zbývá případně: zvednout `CORRIDOR_PENALTY_FRACTION` na 0,4, pokud se ukáže, že
+   pestřejší trasa stojí za třetinu dlaždic (tabulka kalibrace tamtéž).
 3. ~~Nabídnout několik dobrých variant, ne jen nejlepší.~~ **Hotovo (07/2026):** viz
    „Výběr z variant" níže. Zbývá případně měrka stínu (`natural=wood`, `landuse=forest`)
    a vody, aby šlo varianty popsat i podle nich — zatím se popisují délkou, přínosem,

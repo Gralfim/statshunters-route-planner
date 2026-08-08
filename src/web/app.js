@@ -625,7 +625,9 @@ function variantSummary(option, index) {
   parts.push(`prinos ${Math.round(route.benefit.total)}`);
   parts.push(`${Math.round(route.trail_share * 100)} % po znackach`);
   parts.push(`${Math.round(route.along_major_share * 100)} % podel rusnych`);
-  if (route.repeated_km > 0) parts.push(`opakovani ${route.repeated_km} km`);
+  if (route.corridor_share > 0.02) {
+    parts.push(`${Math.round(route.corridor_share * 100)} % stejnym koridorem`);
+  }
   return `<span class="vtitle">${title}</span><span class="vmeta">${parts.join(' · ')}</span>`;
 }
 
@@ -656,9 +658,15 @@ function renderBenefit(route) {
   const parts = Object.entries(route.benefit.gains)
     .filter(([, gain]) => gain > 0)
     .map(([key, gain]) => `+${gain} ${GAIN_LABELS[key] || key}`);
-  const repeated = route.repeated_km > 0
-    ? `opakovani ulic: ${route.repeated_km} km`
-    : 'bez opakovani ulic';
+  // Koridor, ne shoda ulic: trasa, ktera jde udolim tam po jedne strane a zpet
+  // po druhe, ma opakovanych ulic nula a pritom je porad na tomtez miste.
+  // Zapocitavaji se oba pruchody - "kolik behu bude na mistech, ktera uz znam".
+  const repeated = route.corridor_km > 0
+    ? `stejnym koridorem: ${route.corridor_km} km `
+      + `(${Math.round(route.corridor_share * 100)} %`
+      + (route.repeated_km > 0 ? `, z toho touz ulici ${route.repeated_km} km` : '')
+      + ')'
+    : 'nikde neopakuje koridor';
 
   // Merky, podle kterych se trasa vybrala - bez nich nejde posuvnik ladit
   // ani poznat, co zmena delky/klidu udelala.
