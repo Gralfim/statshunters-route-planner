@@ -11,7 +11,7 @@ import math
 
 from geo import haversine_m, tile_center
 from routeplan import candidate_groups, plan_tile_loop, plan_walk
-from scoring import evaluate_tile_set
+from scoring import evaluate_tile_set, square_progress
 from waygraph import covering_graph_path, load_walk_graph
 
 WALK_DETOUR = 1.3               # jen pro levne odhady pri screeningu
@@ -225,7 +225,7 @@ def _opportunity_points(opportunities):
     return points
 
 
-def _harvest_estimate(lat, lon, loop_km, points, context):
+def _harvest_estimate(lat, lon, loop_km, points, context, end=None):
     """Odhad prinosu, ktery beh dane delky z tohoto bodu posbira.
 
     Nahrazuje razeni podle prinosu CELE cilove oblasti. Ten byl zavadejici ve
@@ -233,20 +233,34 @@ def _harvest_estimate(lat, lon, loop_km, points, context):
     (Zbuzany: odhad oblasti 1229, skutecna trasa nic), kdezto blizka oblast ma
     soucet maly, i kdyz by z ni beh nasbiral dost.
 
-    Bere nejlepsi dlazdice v dosahu okruhu a ohodnoti je JAKO MNOZINU
+    Bere nejlepsi dlazdice v dosahu a ohodnoti je JAKO MNOZINU
     (evaluate_tile_set) - zisky square/cluster nejsou aditivni, takze soucet
     jednotlivych skore by poradi opet zkreslil.
+
+    `end` je misto, kde beh konci (u jednosmerne vypravy domov). Pak dosah NENI
+    kruh kolem vystupu, ale ELIPSA: dlazdice se vejde, jen kdyz zajizdka pres ni
+    nepretahne delku behu. Bez toho odhad sliboval dlazdice, kolem kterych trasa
+    domu vubec neprojde - u vystupu Prunerovska sliboval 10 nikdy nenavstivenych
+    dlazdic (14 582 bodu), skutecna trasa nesebrala ani jednu a dala 338.
     """
-    reach_m = loop_km * 1000 / 2 * 0.9
-    near = [
-        (score, tile) for plat, plon, score, tile in points
-        if haversine_m(lat, lon, plat, plon) <= reach_m
-    ]
+    budget_m = loop_km * 1000
+    if end is None:
+        near = [
+            (score, tile) for plat, plon, score, tile in points
+            if haversine_m(lat, lon, plat, plon) <= budget_m / 2 * 0.9
+        ]
+    else:
+        near = [
+            (score, tile) for plat, plon, score, tile in points
+            if haversine_m(lat, lon, plat, plon)
+            + haversine_m(plat, plon, end[0], end[1]) <= budget_m * 0.9
+        ]
     if not near:
         return 0.0
     near.sort(reverse=True)
     take = max(1, int(loop_km * TILES_PER_KM))
-    return evaluate_tile_set({tile for _score, tile in near[:take]}, context)["total"]
+    chosen = {tile for _score, tile in near[:take]}
+    return evaluate_tile_set(chosen, context)["total"] + square_progress(chosen, context)
 
 
 def _transit_candidates(start_lat, start_lon, target_km, tolerance_km, budget_min, pace,
@@ -268,9 +282,10 @@ def _transit_candidates(start_lat, start_lon, target_km, tolerance_km, budget_mi
     # Poradi rozhoduje, co se vejde do MAX_TARGET_CHECKS dotazu na spojeni -
     # radime proto podle odhadu SKLIZNE, ne podle prinosu cele oblasti.
     points = _opportunity_points(opportunities)
+    home = (start_lat, start_lon)
     for target in eligible:
         target["harvest"] = _harvest_estimate(
-            target["lat"], target["lon"], target_km, points, context
+            target["lat"], target["lon"], target_km, points, context, end=home
         )
     eligible.sort(key=lambda target: -target["harvest"])
 
@@ -300,9 +315,22 @@ def _transit_candidates(start_lat, start_lon, target_km, tolerance_km, budget_mi
         alight = network.stops[connection["stop_id"]]
         walk_km = haversine_m(start_lat, start_lon, board[1], board[2]) * WALK_DETOUR / 1000
 
+        # Prijimaci test musi modelovat tvar, ktery se bude planovat - a jako
+        # prvni se zkousi JEDNOSMERNY (MHD tam, beh domu), tedy jedna jizda a
+        # jeden dobeh na zastavku. Dokud se tu pocitalo s okruhem (2x jizda,
+        # 2x dobeh), padalo na rozpocet 35 ze 40 kontrolovanych cilu a kandidati
+        # vznikli jen ctyri - zbytek slotu se protocil naprazdno, takze se na
+        # blizsi a dobre cile uz nedostalo. Okruh se zpatecni jizdou se testuje
+        # az kdyz se domu dobehnout neda (tehdy ho planovac taky pouzije).
         window = _loop_window(
-            target_km, tolerance_km, 2 * walk_km, budget_min, 2 * connection["minutes"], pace
+            target_km, tolerance_km, walk_km, budget_min, connection["minutes"], pace
         )
+        home_km = haversine_m(alight[1], alight[2], start_lat, start_lon) / 1000
+        oneway = window is not None and home_km <= (window[0] + window[1]) * ONEWAY_HOME_SHARE
+        if not oneway:
+            window = _loop_window(
+                target_km, tolerance_km, 2 * walk_km, budget_min, 2 * connection["minutes"], pace
+            )
         if window is None:
             continue
 
@@ -319,7 +347,11 @@ def _transit_candidates(start_lat, start_lon, target_km, tolerance_km, budget_mi
             "loop_tolerance": window[1],
             # ted uz je zname misto vystupu i skutecna delka okruhu, takze se
             # sklizen prepocita presneji nez u stredu cilove oblasti
-            "harvest": _harvest_estimate(alight[1], alight[2], window[0], points, context),
+            # Jednosmerna vyprava konci doma - dosah je elipsa vystup->domov,
+            # dlazdice mimo tuhle osu jsou nedosazitelne. Okruh u cile se domu
+            # nevraci (jede se zpatky MHD), tam plati kruh kolem vystupu.
+            "harvest": _harvest_estimate(alight[1], alight[2], window[0], points,
+                                         context, end=home if oneway else None),
         })
 
     candidates.sort(key=lambda item: -item["harvest"])
@@ -578,7 +610,12 @@ def plan_expedition(start_lat, start_lon, target_km, tolerance_km, budget_min, p
     if not plans:
         raise RuntimeError("Zadna vyprava se do rozpoctu nevejde")
 
-    plans.sort(key=lambda plan: (not plan["within_budget"], -plan["benefit"]["total"], plan["total_min"]))
+    # Radi se prinosem VCETNE strategickeho postupu - stejnou velicinou, kterou
+    # uvnitr pouziva _variant_score, jinak by vyprava vybrana pro postup k square
+    # prohrala v poslednim kroku s vypravou, ktera ho nema.
+    plans.sort(key=lambda plan: (not plan["within_budget"],
+                                 -(plan["benefit"]["total"] + plan["route"].get("progress", 0.0)),
+                                 plan["total_min"]))
     best = plans[0]
 
     # Nabidka k vyberu: dalsi vypravy, ktere vedou jinam nebo maji jiny tvar.

@@ -84,6 +84,87 @@ def _visit_status(tile, period_tiles):
     return visited_periods, missing_periods
 
 
+# Strategicky dosah: dlazdice, ktera max square jeste nezvetsi, ale PRIBLIZI ho,
+# ma cenu - prave kvuli tomu se nekdy bezi. `evaluate_tile_set` ji ohodnoti
+# nulou, protoze meri jen to, co se zlepsi TED, takze takova trasa vypadala
+# hure nez trasa bez jakekoli navaznosti.
+SQUARE_WINDOW_MAX_MISSING = 6    # okna, kterym chybi vic, uz nejsou plan na pristi beh
+SQUARE_WINDOWS_PER_PERIOD = 300  # strop pro rychlost - okna se radi podle poctu chybejicich
+# Nedokonceny postup nemuze platit jako hotovy zisk: cast okna se musi jeste
+# dobehnout a nemusi na to dojit. Zlomek je nizsi nez 0,5, aby "skoro square"
+# neprebilo skutecne zvetseni.
+SQUARE_PROGRESS_FRACTION = 0.4
+
+
+def _square_windows(tiles, side, limit=SQUARE_WINDOWS_PER_PERIOD,
+                    max_missing=SQUARE_WINDOW_MAX_MISSING):
+    """Okna strany `side`, kterym chybi malo dlazdic - kandidati na pristi square.
+
+    Vraci mnoziny chybejicich dlazdic, serazene od nejblizsich k dokonceni.
+    Stejny integralni obraz jako v expedition._square_window_targets, jen se tu
+    okna pocitaji jednou dopredu a pak uz se jen protinaji s trasou.
+    """
+    import numpy as np
+
+    if not tiles or side < 2:
+        return []
+    xs = [x for x, _ in tiles]
+    ys = [y for _, y in tiles]
+    min_x, min_y = min(xs), min(ys)
+    width, height = max(xs) - min_x + 1, max(ys) - min_y + 1
+    if width < side or height < side:
+        return []
+
+    occupancy = np.zeros((width + 1, height + 1), dtype=np.int32)
+    for x, y in tiles:
+        occupancy[x - min_x + 1, y - min_y + 1] = 1
+    integral = occupancy.cumsum(axis=0).cumsum(axis=1)
+    covered = (integral[side:, side:] - integral[:-side, side:]
+               - integral[side:, :-side] + integral[:-side, :-side])
+    counts = side * side - covered
+    hits = np.argwhere((counts <= max_missing) & (counts > 0))
+    if not len(hits):
+        return []
+
+    windows = []
+    seen = set()
+    for index in np.argsort(counts[tuple(hits.T)]):
+        ax, ay = (int(v) for v in hits[index])
+        ax, ay = ax + min_x, ay + min_y
+        missing = frozenset(
+            (ax + dx, ay + dy)
+            for dx in range(side) for dy in range(side)
+            if (ax + dx, ay + dy) not in tiles
+        )
+        if missing in seen:
+            continue
+        seen.add(missing)
+        windows.append(missing)
+        if len(windows) >= limit:
+            break
+    return windows
+
+
+def square_progress(tiles, context):
+    """Cena toho, ze trasa PRIBLIZI budouci zvetseni max square.
+
+    Bere nejlepsi okno v kazdem obdobi (jeden square staci, soucet pres
+    prekryvajici se okna by tentyz krok pocital vickrat) a oceni ho podilem
+    chybejicich dlazdic, ktere trasa doplni. Uz DOKONCENE okno se vynechava -
+    to uz je skutecny zisk a je v `evaluate_tile_set`.
+    """
+    tiles = {tile_xy(tile) for tile in tiles}
+    total = 0.0
+    for period, (value, windows) in context.get("square_windows", {}).items():
+        best = 0.0
+        for missing in windows:
+            filled = len(missing & tiles)
+            if filled and filled < len(missing):
+                best = max(best, value * filled / len(missing))
+        total += best
+    return round(SQUARE_PROGRESS_FRACTION * total, 3)
+
+
 def _measure_gain(tile, baseline, metric):
     if tile in baseline["tiles"]:
         return 0
@@ -103,12 +184,23 @@ def build_route_context(period_tile_dbs, today=None):
         period: _tile_set(tile_db)
         for period, tile_db in period_tile_dbs.items()
     }
+    baselines = {
+        period: _period_baseline(tiles)
+        for period, tiles in period_tiles.items()
+    }
+    # Okna pristiho square se pocitaji jednou - na trase uz zbyde jen prunik.
+    square_windows = {}
+    for period, tiles in period_tiles.items():
+        side = baselines[period]["square_size"] + 1
+        windows = _square_windows(tiles, side)
+        if windows:
+            value = PRIORITY_WEIGHTS[f"{period}_square"] * (side ** 2 - (side - 1) ** 2)
+            square_windows[period] = (value, windows)
+
     return {
         "period_tiles": period_tiles,
-        "baselines": {
-            period: _period_baseline(tiles)
-            for period, tiles in period_tiles.items()
-        },
+        "baselines": baselines,
+        "square_windows": square_windows,
         "last_visits": {
             tile_xy(tile): rec["last_visit"]
             for tile, rec in period_tile_dbs["all"].items()

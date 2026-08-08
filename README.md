@@ -285,15 +285,39 @@ Jak to funguje:
    vylepšit přidáváním nevyužitých kandidátů (2 kola). Při přetečení tolerance
    odpadá nejslabší waypoint; naopak pokud trasa nedosáhne spodní hranice, dotáhne
    se přes další tiles v dosahu (`_extend_to_window`).
-3. **Cílová funkce** (`_variant_score`) — přínos postupně snižovaný čtyřmi **podílovými**
-   měrkami kvality:
+3. **Cílová funkce** (`_variant_score`) — přínos (plus strategický postup, viz níže)
+   postupně snižovaný čtyřmi **podílovými** měrkami kvality:
 
    ```
-   skóre = přínos × (1 − 0,25 × podíl délky v opakovaném koridoru)
+   skóre = (přínos + strategický postup)
+                  × (1 − 0,25 × podíl délky v opakovaném koridoru)
                   × (1 − váha klidu × podíl délky podél významných ulic)
                   × (1 − váha klidu × 0,5 × podíl délky MIMO značené trasy)
                   × (1 − 0,35 × odchylka délky od cíle / tolerance)
    ```
+
+   **Strategický postup** (`scoring.square_progress`) je druhá polovina hodnoty trasy.
+   `evaluate_tile_set` měří, co se zlepší **teď**; dlaždice, která max square ještě
+   nezvětší, ale přiblíží ho k příštímu běhu, dostane nulu — a taková trasa pak vypadá
+   hůř než trasa bez jakékoli návaznosti. Přitom právě tohle bývá důvod, proč se běh
+   plánuje. Měří se to takto: pro každé období se předpočítají **okna příštího square**
+   (strana o 1 větší než dnešní maximum, chybí jim nejvýš `SQUARE_WINDOW_MAX_MISSING`
+   dlaždic), a trasa dostane podíl hodnoty toho nejlepšího okna podle toho, kolik
+   z chybějících dlaždic doplní. Bere se **nejlepší okno v období**, ne součet —
+   překrývající se okna by tentýž krok počítala vícekrát. Dokončené okno se vynechává,
+   to už je skutečný zisk v `evaluate_tile_set`. Postup se krátí na
+   `SQUARE_PROGRESS_FRACTION` (0,4), aby „skoro square" nikdy nepřebilo square —
+   jinak by plánovač raději navždy začínal, než jednou dokončil.
+
+   Ověřeno na skutečném běhu uživatele (Stodůlky → Barrandov, 08/2026): doplní **1 z 5**
+   dlaždic chybějících k ročnímu square 12×12, tedy postup 235,5 k přínosu 708,7. Bez
+   téhle měrky čísla hlavní motivaci té trasy vůbec nepopsala.
+
+   Cena: strategicky výrazná trasa vyhraje v **obou** krajních polohách posuvníku klidu,
+   takže posuvník na ní přestane být vidět. Na referenčním okruhu z Karlova nám. stačí
+   postup 28 bodů, aby přehodil rozdíl přínosu 112,6 vs 124,9. Je to správné chování
+   (strategicky lepší trasa má vyhrát), ale je dobré o něm vědět; slow testy posuvníku
+   proto strategický člen vypínají, aby měřily to, co tvrdí.
 
    Podíly, ne absolutní hodnoty — s absolutní penalizací byl vždy nejvýhodnější
    nejkratší přípustný okruh. Násobení přínosem drží měřítko a nedovolí zápornou
@@ -626,6 +650,7 @@ pytest -m slow         # kontrolní měření na skutečném grafu Prahy (~1 min
 | `tests/test_static_cache.py` | statické soubory nesou `Cache-Control: no-cache` a zároveň validátory pro 304 |
 | `tests/test_expedition.py` | časové okno běhu (doběh a jízda ho zkracují, 24minutový strop na spojení), jednosměrný tvar dá širší okno, práh pro blízké cíle, odhad sklizně |
 | `tests/test_graph_cache.py` | cache připraveného grafu: zneplatnění při změně parametrů, round-trip, úklid starých otisků, odolnost proti poškozenému souboru |
+| `tests/test_square_progress.py` | strategický postup: dokončené okno se nepočítá jako postup (to je zisk), víc doplněných dlaždic je víc, postup nikdy nepřebije skutečné dokončení, hodnota okna odpovídá váze priority |
 | `tests/test_corridor.py` | opakovaný koridor: rovná trasa nic nehlásí, tam-a-zpět počítá oba průchody, **souběžná pěšina se počítá, i když se neopakuje žádná hrana**, vzdálenější ulice ne, ohyb ani krátký slepý ocásek ne |
 | `tests/test_transit_schedule.py` | jízdní řád z GTFS: varianta z jiného období nenafoukne interval, linku popisuje ta varianta, která opravdu jede, zkrácený spoj se nestane tváří linky, výjimky z `calendar_dates.txt`, expirace feedu a platnost cache grafu |
 | `tests/test_trails.py` | značené trasy: plánovaná i „doporučená" cyklotrasa se zahodí, existující přežije i s dírou (`complete=no`), turistických se filtr netýká; selhání stahování se nezapamatuje (disk ani paměť) a zkusí se všechna zrcadla |
@@ -657,6 +682,25 @@ I výprava se nabízí **v několika variantách** (`MAX_EXPEDITION_VARIANTS`) �
 zastávky a tvary, každá kompletní i s během, itinerářem a GPX. Rozlišují se podle dvojice
 (tvar, výstupní zastávka); vnitřní varianty samotného běhu se zahazují, dvouúrovňový výběr
 (kam jet a kudy běžet) by byl matoucí.
+
+**Přijímací test kandidáta modeluje tvar, který se opravdu naplánuje.** Dokud se u všech
+cílů počítalo s okruhem (2× jízda, 2× doběh), padalo na rozpočet **35 ze 40** kontrolovaných
+cílů a kandidáti vznikli jen čtyři — zbytek slotů se protočil naprázdno, takže na bližší
+a dobré cíle už nedošlo. Teď se nejdřív testuje jednosměrný tvar (jedna jízda) a okruh
+až tehdy, když se domů doběhnout nedá — tedy přesně v pořadí, ve kterém se plány staví.
+Naměřeno z Karlova nám. (15 ± 3 km, 150 min, víkend): kandidátů **4 → 7**.
+
+**Odhad sklizně počítá s elipsou, ne s kruhem.** Jednosměrný běh končí doma, takže
+dosažitelné jsou jen dlaždice, přes které zajížďka nepřetáhne délku běhu —
+`dist(výstup, dlaždice) + dist(dlaždice, domov) ≤ délka běhu`. S kruhem kolem cíle
+sliboval odhad u výstupu Prunéřovská 10 nikdy nenavštívených dlaždic (14 582 bodů),
+skutečná trasa domů kolem nich neprojde a nesebrala ani jednu — dala 338. Kvůli téhle
+nadsázce se sloty spotřebovaly na vzdálené cíle a **koridor Stodůlky → Barrandov, který
+si uživatel našel ručně, byl 150. ze 157**. S elipsou je **7.** U okruhu se zpáteční
+jízdou se domů neběží, tam platí kruh kolem výstupu.
+
+Dopad obou oprav dohromady na tomtéž zadání: vítěz **338 → 512** a jede tam, kam
+uživatel sám (metro B na Stodůlky).
 
 Okruh se zpáteční jízdou se počítá až jako náhrada pro cíle, ze kterých se domů doběhnout
 nedá (`ONEWAY_HOME_SHARE`) — plánovat oba tvary pro každého kandidáta by dobu plánování

@@ -623,6 +623,7 @@ function variantSummary(option, index) {
   }
 
   parts.push(`prinos ${Math.round(route.benefit.total)}`);
+  if (route.progress > 0) parts.push(`+${Math.round(route.progress)} k square`);
   parts.push(`${Math.round(route.trail_share * 100)} % po znackach`);
   parts.push(`${Math.round(route.along_major_share * 100)} % podel rusnych`);
   if (route.corridor_share > 0.02) {
@@ -685,9 +686,16 @@ function renderBenefit(route) {
     : `delka: ${route.length_km} km (cil ${route.target_km}, odchylka `
       + `${offBy < 0.05 ? 'presne na cili' : offBy.toFixed(1) + ' km'})`;
 
+  // Strategicky postup: dlazdice, ktere max square jeste nezvetsi, ale priblizi
+  // ho k dalsimu behu. Bez toho cisla nepopisou hlavni duvod, proc se nekdy bezi.
+  const progress = route.progress > 0
+    ? `<br>krok k vetsimu square: +${Math.round(route.progress)}`
+    : '';
+
   routeBenefit.innerHTML = `<strong>Prinos trasy (score ${route.benefit.total})</strong><br>`
     + (parts.length ? parts.join('<br>') : 'Zadne zlepseni statistik')
     + `<br>stari navstev: +${route.benefit.staleness}`
+    + progress
     + `<hr class="thin">${[length, major, trail, repeated].filter(Boolean).join('<br>')}`
     + (route.score !== undefined ? `<br>vysledne skore: ${route.score}` : '');
   routeBenefit.hidden = false;

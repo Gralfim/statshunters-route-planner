@@ -502,7 +502,7 @@ def _route_details(graph, leg_cache, index, start_node, sequence, min_m, max_m, 
     Pri prekroceni max_m odpada nejslabsi waypoint. avoid_reuse penalizuje
     opakovany pruchod stejnou ulici, quiet_factor cesty podel vyznamnych ulic
     a trail_factor zvyhodnuje znacene trasy."""
-    from scoring import evaluate_tile_set
+    from scoring import evaluate_tile_set, square_progress
 
     sequence = list(sequence)
     start_point = (graph.nodes[start_node]["y"], graph.nodes[start_node]["x"])
@@ -550,6 +550,7 @@ def _route_details(graph, leg_cache, index, start_node, sequence, min_m, max_m, 
         "coordinates": coordinates,
         "tiles_crossed": sorted(crossed),
         "benefit": evaluate_tile_set(crossed, context),
+        "progress": square_progress(crossed, context),
         "in_window": min_m <= length_m <= max_m,
         "repeated_m": repeated_m(graph, node_path),
         "corridor_m": corridor_m(coordinates),
@@ -599,7 +600,10 @@ def _variant_score(details, target_m, tolerance_m, quiet_weight):
     off_trail = 1.0 - min(details.get("trail_m", 0.0) / length_m, 1.0)
     deviation = min(abs(length_m - target_m) / tolerance_m, 1.0) if tolerance_m > 0 else 0.0
 
-    return (details["benefit"]["total"]
+    # Prinos + strategicky postup: dlazdice, ktera max square jeste nezvetsi, ale
+    # priblizi ho, ma cenu - prave kvuli tomu se nekdy bezi (viz scoring.
+    # square_progress). Merky kvality snizuji obojí stejne.
+    return ((details["benefit"]["total"] + details.get("progress", 0.0))
             * (1 - CORRIDOR_PENALTY_FRACTION * corridor)
             * (1 - quiet_weight * major)
             * (1 - quiet_weight * TRAIL_PENALTY_FRACTION * off_trail)
@@ -775,6 +779,7 @@ def plan_tile_loop(graph, start_lat, start_lon, target_km, tolerance_km, candida
                                            waypoint_tiles=waypoints,
                                            coordinates=details["coordinates"]),
             "benefit": details["benefit"],
+            "progress": details["progress"],
             "repeated_km": round(details["repeated_m"] / 1000, 2),
             "corridor_km": round(details["corridor_m"] / 1000, 2),
             "corridor_share": round(details["corridor_m"] / length_m, 3),

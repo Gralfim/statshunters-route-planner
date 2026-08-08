@@ -172,21 +172,35 @@ def test_route_reports_the_measures_it_was_chosen_by(planned_route):
 
 @pytest.fixture(scope="module")
 def slider_ends(planned_route):
-    """Trasa pri nulove a plne vaze klidu (drahe - planuje se dvakrat)."""
-    graph, _route, _node_path = planned_route
+    """Trasa pri nulove a plne vaze klidu (drahe - planuje se dvakrat).
+
+    Strategicky postup k budoucimu square se pro tuhle sadu VYPINA. Meri se tu
+    posuvnik klidu, a kdyz jedna trasa vede v postupu, vyhrava v obou krajnich
+    polohach - na referencnim okruhu z Karlova nam. staci postup 28 bodu, aby
+    prehodil rozdil prinosu 112,6 vs 124,9 a obe polohy daly tutez trasu.
+    Sam o sobe je to spravne chovani (strategicky lepsi trasa ma vyhrat), jen
+    to neni to, co tyto testy tvrdi.
+    """
+    import scoring
     from api import get_period_tile_database
     from routeplan import plan_tile_loop
     from scoring import build_route_context, find_tile_opportunities
 
+    graph, _route, _node_path = planned_route
     tile_dbs = {key: get_period_tile_database(key) for key in ("all", "year", "recent")}
     opportunities = find_tile_opportunities(tile_dbs)
     context = build_route_context(tile_dbs)
 
-    return {
-        weight: plan_tile_loop(graph, HOME[0], HOME[1], DISTANCE_KM, TOLERANCE_KM,
-                               opportunities, context, quiet_weight=weight)
-        for weight in (0.0, 1.0)
-    }
+    strategic = scoring.SQUARE_PROGRESS_FRACTION
+    scoring.SQUARE_PROGRESS_FRACTION = 0.0
+    try:
+        return {
+            weight: plan_tile_loop(graph, HOME[0], HOME[1], DISTANCE_KM, TOLERANCE_KM,
+                                   opportunities, context, quiet_weight=weight)
+            for weight in (0.0, 1.0)
+        }
+    finally:
+        scoring.SQUARE_PROGRESS_FRACTION = strategic
 
 
 def test_quiet_weight_avoids_busy_streets(slider_ends):
