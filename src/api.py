@@ -17,7 +17,7 @@ from frontier import frontier_tiles
 from geojson import feature_collection, tile_feature, tile_outline_feature_collection
 from load import load_activities
 from routeplan import plan_tile_loop, route_to_gpx
-from scoring import build_route_context, find_tile_opportunities
+from scoring import PERIODS, build_route_context, find_tile_opportunities
 from square import find_largest_square
 from statshunters import resolve_share_link, sync_activities
 from tiles import build_tile_database
@@ -81,15 +81,6 @@ def get_tile_database():
     return build_tile_database(get_activities())
 
 
-def _subtract_months(day, months):
-    month_index = day.year * 12 + day.month - 1 - months
-    year = month_index // 12
-    month = month_index % 12 + 1
-    leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
-    month_lengths = [31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    return date(year, month, min(day.day, month_lengths[month - 1]))
-
-
 def period_definitions(today=None):
     today = today or date.today()
     return {
@@ -104,12 +95,6 @@ def period_definitions(today=None):
             "start_date": date(today.year, 1, 1),
             "end_date": today,
             "color": "#eda100",
-        },
-        "recent": {
-            "label": "Posledni 3 mesice",
-            "start_date": _subtract_months(today, 3),
-            "end_date": today,
-            "color": "#e34948",
         },
     }
 
@@ -240,22 +225,18 @@ def square_geojson(period_key: str):
     )
 
 
+def _period_tile_databases():
+    return {period: get_period_tile_database(period) for period in PERIODS}
+
+
 @lru_cache
 def get_opportunities():
-    return find_tile_opportunities({
-        "all": get_period_tile_database("all"),
-        "year": get_period_tile_database("year"),
-        "recent": get_period_tile_database("recent"),
-    })
+    return find_tile_opportunities(_period_tile_databases())
 
 
 @lru_cache
 def get_route_context():
-    return build_route_context({
-        "all": get_period_tile_database("all"),
-        "year": get_period_tile_database("year"),
-        "recent": get_period_tile_database("recent"),
-    })
+    return build_route_context(_period_tile_databases())
 
 
 @lru_cache
@@ -294,6 +275,9 @@ def metro():
 
 @app.get("/api/opportunities")
 def opportunities_geojson():
+    # Dlazdice, ktere maji cenu jen podle stari posledni navstevy, jsou kandidati
+    # pro planovani, ale ne doporuceni - v mape by obrysem oznacily kazdou
+    # navstivenou dlazdici. Stari ukazuje popup samotne dlazdice.
     return feature_collection(
         tile_feature(opportunity["tile"], {
             "kind": "opportunity",
@@ -311,6 +295,7 @@ def opportunities_geojson():
             "gains": opportunity["gains"],
         })
         for opportunity in get_opportunities()
+        if not opportunity["stale_only"]
     )
 
 
@@ -365,7 +350,7 @@ def plan_route(request: RouteRequest):
     except RuntimeError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
-    candidate_tiles = {tuple(item["tile"]) for item in opportunities}
+    candidate_tiles = {tuple(item["tile"]) for item in opportunities if not item["stale_only"]}
     # Kazda nabidnuta varianta musi byt kompletni - uzivatel si ji vybere a
     # rovnou chce itinerar i GPX, bez dalsiho dotazu na server.
     for variant in [route] + route.get("variants", []):

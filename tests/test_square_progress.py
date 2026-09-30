@@ -26,13 +26,13 @@ def world():
 
 
 def context_for(tiles):
-    """Kontext jen s obdobim "all" - year a recent zustavaji prazdne, aby se
-    postup dal cist z jednoho okna."""
+    """Kontext jen s obdobim "all" - year zustava prazdny, aby se postup dal
+    cist z jednoho okna."""
     def db(items):
         return {tile: {"last_visit": VISIT, "first_visit": VISIT, "visit_count": 1}
                 for tile in items}
 
-    return build_route_context({"all": db(tiles), "year": {}, "recent": {}}, today=TODAY)
+    return build_route_context({"all": db(tiles), "year": {}}, today=TODAY)
 
 
 def test_a_route_that_fills_nothing_has_no_progress():

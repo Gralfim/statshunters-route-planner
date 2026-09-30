@@ -109,7 +109,7 @@ for (const [name, zIndex] of Object.entries(PANES)) {
 
 const OPPORTUNITY_COLOR = '#4a3aa7';
 
-const periodOrder = ['all', 'year', 'recent'];
+const periodOrder = ['all', 'year'];
 const overlayGroups = {
   metro: L.layerGroup().addTo(map),
   tiles: L.layerGroup().addTo(map),
@@ -125,8 +125,7 @@ function opportunityPopup(p) {
   const visited = p.visited_periods || {};
   const visitStatus = [
     `Celkem: ${visited.all ? 'ano' : 'ne'}`,
-    `Letos: ${visited.year ? 'ano' : 'ne'}`,
-    `3 mesice: ${visited.recent ? 'ano' : 'ne'}`
+    `Letos: ${visited.year ? 'ano' : 'ne'}`
   ].join('<br>');
   const reasons = (p.reasons || [])
     .map(reason => {
@@ -486,10 +485,7 @@ const GAIN_LABELS = {
   all_unvisited: 'uplne nove tiles',
   year_square: 'square letos',
   year_cluster: 'cluster letos',
-  year_unvisited: 'nove letos',
-  recent_square: 'square 3 mes.',
-  recent_cluster: 'cluster 3 mes.',
-  recent_unvisited: 'nove za 3 mes.'
+  year_unvisited: 'nove letos'
 };
 
 // Zvyrazneni useku v mape pri kliknuti na radek itinerare. Souradnice kroku se

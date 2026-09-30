@@ -11,7 +11,7 @@ import math
 
 from geo import haversine_m, tile_center
 from routeplan import candidate_groups, plan_tile_loop, plan_walk
-from scoring import evaluate_tile_set, square_progress
+from scoring import PERIODS, evaluate_tile_set, square_progress
 from waygraph import covering_graph_path, load_walk_graph
 
 WALK_DETOUR = 1.3               # jen pro levne odhady pri screeningu
@@ -87,7 +87,7 @@ def _square_window_targets(context, max_missing=4, per_period=8):
     height = max(ys) - min_y + 1
 
     targets = []
-    for period in ("all", "year", "recent"):
+    for period in PERIODS:
         tiles = context["period_tiles"][period]
         side = context["baselines"][period]["square_size"] + 1
         if not tiles or side < 2 or width < side or height < side:
@@ -132,10 +132,14 @@ def _square_window_targets(context, max_missing=4, per_period=8):
 
 def build_targets(opportunities, context):
     """Cilove oblasti = lokalni skupiny sousednich kandidatu se spolecnym
-    prinosem + okna na dokompletovani max square."""
+    prinosem + okna na dokompletovani max square.
+
+    Kandidati "jen stari" se vynechavaji: za samotnym starim se MHD nejezdi a
+    jako soused by slepili skupiny skutecnych doporuceni do jedne plochy."""
     candidates = [
         {"tile": tuple(item["tile"]), "score": item["score"]}
         for item in opportunities
+        if not item.get("stale_only")
     ]
     for cand in candidates:
         lat, lon = tile_center(cand["tile"])

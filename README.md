@@ -87,7 +87,7 @@ resp. `/api/expedition`).
 | Soubor | Účel |
 |---|---|
 | `src/main.py` | vstupní bod — argparse + uvicorn |
-| `src/api.py` | FastAPI endpointy, cache, definice období (all / year / recent = 3 měsíce) |
+| `src/api.py` | FastAPI endpointy, cache, definice období (all / year) |
 | `src/load.py`, `src/models.py` | načtení JSON exportů → `Activity`, `Tile` |
 | `src/tiles.py` | tile databáze (visit_count, first/last_visit) s filtrem podle období |
 | `src/frontier.py` | hraniční tiles (nenavštívení sousedé navštívených) |
@@ -191,11 +191,12 @@ neobjeví — je potřeba smazat `data/pid_gtfs.zip` a `data/transit_graph.json`
 ### Barvy na mapě
 
 Každý navštívený tile se kreslí jednou, barvou podle **období poslední návštěvy** (studená → teplá):
-modrá `#2a78d6` = naposledy před letoškem, žlutá `#eda100` = letos (před více než 3 měsíci),
-červená `#e34948` = poslední 3 měsíce. Doporučené tiles: fialová výplň `#4a3aa7` u dosud
+modrá `#2a78d6` = naposledy před letoškem, žlutá `#eda100` = letos. (Třetí, červená vrstva
+„poslední 3 měsíce" byla 09/2026 zrušena spolu s tím obdobím — viz skóre níže.) Doporučené
+tiles: fialová výplň `#4a3aa7` u dosud
 nenavštívených; doporučení na už navštíveném tile má jen tmavý obrys bez výplně, aby
 nepřekrylo barvu jeho období (tu informaci nese sám tile). Paleta je ověřená validátorem
-na rozlišitelnost včetně barvosleposti (nejhorší pár období ΔE 15,3, cíl ≥ 8). Obrysy max
+na rozlišitelnost včetně barvosleposti (ΔE ≥ 15,3, cíl ≥ 8). Obrysy max
 clusteru (čárkovaně) a max square (plně) používají barvu svého období a jsou neklikatelné,
 aby nepřekrývaly popupy tiles a doporučení.
 
@@ -208,11 +209,11 @@ aby nepřekrývaly popupy tiles a doporučení.
 | `GET /api/transit/metro` | trasy metra a stanice pro orientaci v mapě (z už načtené sítě PID) |
 | `GET /api/pois` | orientační body a občerstvení z OSM; `?lat=&lon=` (výchozí domov) |
 | `GET /api/summary` | počty aktivit, config, metriky pro všechna období |
-| `GET /api/periods/{period}/tiles` | navštívené tiles (GeoJSON); `period` = `all` \| `year` \| `recent` |
+| `GET /api/periods/{period}/tiles` | navštívené tiles (GeoJSON); `period` = `all` \| `year` |
 | `GET /api/periods/{period}/frontier` | hraniční tiles |
 | `GET /api/periods/{period}/cluster` | obrys největšího clusteru |
 | `GET /api/periods/{period}/square` | obrys největšího čtverce |
-| `GET /api/opportunities` | doporučené tiles seřazené podle skóre (rank, důvody, přínosy, stáří poslední návštěvy) |
+| `GET /api/opportunities` | doporučené tiles seřazené podle skóre (rank, důvody, přínosy, stáří poslední návštěvy); bez kandidátů „jen stáří" |
 | `POST /api/route` | naplánuje okruh; JSON body `{lat, lon, distance_km, tolerance_km, quiet_weight}` (vše volitelné, výchozí z configu); vrací délku, waypointy, protnuté tiles, souřadnice, měrky kvality i GPX |
 | `POST /api/expedition` | naplánuje celou výpravu (běh + volitelně MHD); body navíc `{budget_min, pace_min_per_km}`; vrací segmenty (běh na zastávku / MHD / okruh / návrat), časy a alternativní směry |
 | `POST /api/sync` | stáhne čerstvá data ze StatsHunters, přepíše `data/` a vyčistí cache |
@@ -222,11 +223,30 @@ Všechny odpovědi se počítají při prvním dotazu a drží v `lru_cache` —
 
 ## Jak se počítá skóre doporučených tiles
 
-Kandidáti = hraniční tiles všech období + tiles nenavštívené letos / v posledních 3 měsících.
+Kandidáti = hraniční tiles obou období + **všechny** už navštívené tiles (viz bod 2).
 Skóre tile má dvě složky:
 
-1. **Priority** — 9 pravidel (zvětšení square / clusteru / nenavštívenost × období celkem → letos → 3 měsíce) s explicitními váhami: poměr **4 : 2 : 1 uvnitř období** (square : cluster : nenavštívený) a **16× odstup mezi obdobími** (celkem 2048/1024/512, letos 128/64/32, 3 měsíce 8/4/2) — výrazná převaha delších období, např. růst ročního clusteru přebije růst 3měsíčního square.
-2. **Stáří poslední návštěvy** — spojitý bonus 0–1: nikdy nenavštívený tile = 1,0; jinak `dny od poslední návštěvy / 1095` (strop 3 roky). Bonus je menší než minimální rozestup mezi kombinacemi priorit (2), takže jen doladí pořadí mezi tiles se stejnými prioritami — „kde jsem dlouho nebyl" vyhrává.
+1. **Priority** — 6 pravidel (zvětšení square / clusteru / nenavštívenost × období celkem → letos) s explicitními váhami: poměr **4 : 2 : 1 uvnitř období** (square : cluster : nenavštívený) a **16× odstup mezi obdobími** (celkem 2048/1024/512, letos 128/64/32) — výrazná převaha delšího období, např. růst celkového clusteru přebije růst ročního square.
+2. **Stáří poslední návštěvy** — bonus 0–1: nikdy nenavštívený tile = 1,0; tile proběhnutý v posledních **30 dnech** (`STALENESS_FRESH_DAYS`) = 0; potom roste **logaritmicky** do 3 let (`log(dny/30) / log(1095/30)`):
+
+   | naposledy před | 30 dny | 3 měsíci | půl rokem | rokem | 2 roky | 3 roky |
+   |---|---|---|---|---|---|---|
+   | bonus | 0 | 0,31 | 0,50 | 0,69 | 0,89 | 1 |
+
+   Bonus je menší než nejmenší váha priority (32), takže o trase rozhoduje jen tam, kde žádná priorita nezabírá — typicky na okruzích z domova, kde je v dosahu všechno letos navštívené. Tam je to jediné, co brání opakování. Tiles, které mají **jen** bonus za stáří (`stale_only`), jsou kandidáty pro plánování, ale v mapě ani v itineráři se jako doporučení neukazují (byla by to každá navštívená dlaždice) — pokud na ně trasa přímo nemíří.
+
+**Proč už ne 3 měsíce (09/2026).** Dřív existovalo třetí období „posledních 3 měsíců" s vahami 8/4/2. Bylo plovoucí a krátké, takže se nedalo cíleně zlepšovat: novým během se jeho square zvětšil, ale jinde z okna mezitím dlaždice vypadla. Jeho skutečná role — neposílat krátké okruhy tam, kde se nedávno běželo — přešla na bonus za stáří.
+
+Tvar bonusu je změřený, ne odhadnutý. Na okruhu 15 ± 3 km z Karlova nám. den po každém běhu z července a srpna 2026 (počet dlaždic trasy proběhnutých v posledních 3 týdnech):
+
+| tvar bonusu | 13. 7. | 17. 8. | 22. 8. |
+|---|---|---|---|
+| lineární `dny / 1095` (původní vzorec, už bez 3měsíčního období) | 1 | 1 | 1 |
+| čistý logaritmus `log(1 + dny/τ)`, τ = 7 dní | 3 | 6 | 6 |
+| logaritmus s nulovou zónou 14 dní | – | – | 6 |
+| **logaritmus s nulovou zónou 30 dní** | **1** | **1** | **1** |
+
+Čistý logaritmus roste nejrychleji hned na začátku: dlaždice proběhnutá před 3 týdny má přes polovinu hodnoty čtvrtletní, takže okruh radši protne víc čerstvých dlaždic, než by zajel pro starší (τ = 30 i 90 dní dalo 22. 8. totéž co τ = 7). Nulová zóna 21 dní prošla všemi dny, ale 22. 8. jen o den (rušivé dlaždice byly staré přesně 20 dní) — proto 30. Lineární tvar opakování brání stejně dobře, jenže dlaždici starou 3 roky cení trojnásobně proti roční — a tak velký rozdíl mezi starými návštěvami nedává smysl; logaritmus ho srovná na 1,4×. Ostatní dny (3. 8., 10. 8.) dávaly u všech tvarů shodnou trasu; 20. a 27. 7. šla trasa pro letos nenavštívenou dlaždici, kvůli které se přes čerstvé dlaždice projít vyplatí.
 
 **Zásada (důležité pro budoucí plánování tras):** skóre tile je *čistý přínos* jeho návštěvy — nikdy nesmí obsahovat náklady na cestu (MHD, vzdálenost od domova). Optimalizace trasy bude maximalizovat součet přínosů tiles na trase; kdyby byla cena dopravy ve skóre, započítala by se tolikrát, kolika tiles trasa projde. Náklady na dopravu patří až na úroveň trasy, jednou za trasu.
 
@@ -639,7 +659,7 @@ pytest -m slow         # kontrolní měření na skutečném grafu Prahy (~1 min
 | Soubor | Co hlídá |
 |---|---|
 | `tests/test_metrics.py` | max square a max cluster (4-sousednost, díry, prázdná množina) |
-| `tests/test_scoring.py` | pořadí vah priorit, neaditivita zisků nad množinou, square vážený plochou, strop staleness |
+| `tests/test_scoring.py` | pořadí vah priorit, neaditivita zisků nad množinou, square vážený plochou, tvar a strop bonusu za stáří, kandidáti „jen stáří" |
 | `tests/test_cost_model.py` | pořadí preferencí typů cest + kontext: chodník podél rušné ulice prohrává s klidnou ulicí, značka je bonus, kontext hranu nikdy nezlevní |
 | `tests/test_itinerary.py` | kilometráž kroků i orientačních bodů, souběžná ulice není křížení, deduplikace napříč kroky, žádné „rovne"; sběr dlaždic (hloubka průniku, každý sběr právě jednou), odstupňování odboček, rozhodovací body; slučování nesmí spolknout ulici (zacelení mezer, prahy úseků), rozsah platnosti značky |
 | `tests/test_route_quality.py` | *(slow)* podíl délky podél významných ulic a klidných cest, dodržení tolerance, konzistence kilometráže na reálné trase |
@@ -812,7 +832,8 @@ v panelu; čistý okruh bez MHD je vždy jednou z porovnávaných variant.
 - **výpravy s MHD** (`src/transit.py` + `src/expedition.py` + `POST /api/expedition` + tlačítko v UI) — ověřeno E2E: z Karlova nám. při 15±3 km / 120 min vyhrála výprava metro A + bus 350 do Roztok (benefit 1371 vs. 96,6 čistého okruhu, 3 nové tiles, 117,7 min); při 12±3 km / 150 min vlak T7 do Dobřichovic (0 přestupů) s dokompletováním **celkového square 15×15 → 16×16** (benefit 17 138, 148,4 min) — shoduje se s intuicí uživatele (Černošice/Solopisky), která na 120 min opravdu nevychází.
 
 **Empirické zjištění (07/2026):** v doběhovém dosahu z Karlova náměstí (~8 km) je už všechno
-navštívené i letos — lokálně jde zlepšovat jen 3měsíční metriky. Velké zisky (nové tiles,
+navštívené i letos — lokálně šlo zlepšovat jen 3měsíční metriky (od 09/2026 je místo nich
+rozhoduje bonus za stáří). Velké zisky (nové tiles,
 celkový square/cluster) leží na okrajích navštíveného území, tj. vyžadují jiný start nebo
 dopravu — to dává prioritu bodu „Dosažitelnost MHD" níže.
 

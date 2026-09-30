@@ -108,7 +108,7 @@ def context_with(tiles, visited=()):
         return {tile: {"last_visit": moment, "first_visit": moment, "visit_count": 1}
                 for tile in items}
 
-    return build_route_context({"all": db(visited), "year": db(visited), "recent": db(visited)},
+    return build_route_context({"all": db(visited), "year": db(visited)},
                                today=date(2026, 7, 31))
 
 

@@ -35,7 +35,7 @@ def planned_route():
     import routeplan
     from api import get_period_tile_database
     from routeplan import plan_tile_loop
-    from scoring import build_route_context, find_tile_opportunities
+    from scoring import PERIODS, build_route_context, find_tile_opportunities
     from waygraph import load_walk_graph
 
     if not any((ROOT / "data").glob("walk_*km.graphml")):
@@ -46,7 +46,7 @@ def planned_route():
     if graph.graph.get("street_segments") is None:
         pytest.skip("graf nema index ulic - bez nej se kontext cest neda merit")
 
-    tile_dbs = {key: get_period_tile_database(key) for key in ("all", "year", "recent")}
+    tile_dbs = {key: get_period_tile_database(key) for key in PERIODS}
 
     # node_path v odpovedi neni (do UI nepatri), ale mereni ho potrebuje.
     # Patchuje se jmeno v routeplan, kde se pouziva - ne v itinerary, odkud
@@ -187,7 +187,7 @@ def slider_ends(planned_route):
     from scoring import build_route_context, find_tile_opportunities
 
     graph, _route, _node_path = planned_route
-    tile_dbs = {key: get_period_tile_database(key) for key in ("all", "year", "recent")}
+    tile_dbs = {key: get_period_tile_database(key) for key in scoring.PERIODS}
     opportunities = find_tile_opportunities(tile_dbs)
     context = build_route_context(tile_dbs)
 

@@ -335,13 +335,13 @@ def _square_completion_seeds(within, context, start, end, max_m):
     tiles maji samy o sobe nulovy square prinos (nesctitavost), takze by je
     obecne vyhledavani nemelo duvod kombinovat - proto dostavaji vlastni seed.
     Chybejici tile nemusi byt kandidat ze scoringu (score 0)."""
-    from scoring import PRIORITY_WEIGHTS
+    from scoring import PERIODS, PRIORITY_WEIGHTS
 
     by_tile = {cand["tile"]: cand for cand in within}
     seeds = []
     seen = set()
 
-    for period in ("all", "year", "recent"):
+    for period in PERIODS:
         tiles = context["period_tiles"][period]
         side = context["baselines"][period]["square_size"] + 1
         weight = PRIORITY_WEIGHTS[f"{period}_square"]
@@ -756,13 +756,15 @@ def plan_tile_loop(graph, start_lat, start_lon, target_km, tolerance_km, candida
 
     # Dlazdice, kvuli kterym se beh dela: ty, na ktere trasa mirila (waypointy),
     # plus vsechny doporucene, ktere cestou protne. Itinerar podle nich rekne,
-    # kde a jak hluboko se sbira.
-    recommended = {tuple(cand["tile"]) for cand in candidates}
+    # kde a jak hluboko se sbira. Kandidati "jen stari" doporucenim nejsou -
+    # byla by to kazda protnuta dlazdice; pocitaji se jen jako waypointy.
+    recommended = {tuple(cand["tile"]) for cand in candidates if not cand.get("stale_only")}
 
     def output(details):
         length_m = details["length_m"] or 1.0
         waypoints = [item["tile"] for item in details["sequence"]]
-        collected = [tile for tile in details["tiles_crossed"] if tile in recommended]
+        collected = [tile for tile in details["tiles_crossed"]
+                     if tile in recommended or tile in waypoints]
         return {
             "length_km": round(details["length_m"] / 1000, 2),
             "target_km": target_km,
@@ -832,9 +834,9 @@ def main():
     args = parser.parse_args()
 
     from api import get_period_tile_database
-    from scoring import build_route_context, find_tile_opportunities
+    from scoring import PERIODS, build_route_context, find_tile_opportunities
 
-    tile_dbs = {key: get_period_tile_database(key) for key in ("all", "year", "recent")}
+    tile_dbs = {key: get_period_tile_database(key) for key in PERIODS}
     opportunities = find_tile_opportunities(tile_dbs)
     context = build_route_context(tile_dbs)
 
@@ -845,7 +847,7 @@ def main():
 
     route = plan_tile_loop(graph, args.lat, args.lon, args.distance, args.tolerance, opportunities, context)
 
-    candidate_tiles = {tuple(o["tile"]) for o in opportunities}
+    candidate_tiles = {tuple(o["tile"]) for o in opportunities if not o["stale_only"]}
     crossed_candidates = [t for t in route["tiles_crossed"] if t in candidate_tiles]
     print(f"\nLoop length: {route['length_km']} km (target {args.distance}+-{args.tolerance})")
     print(f"Waypoint tiles: {route['waypoint_tiles']}")

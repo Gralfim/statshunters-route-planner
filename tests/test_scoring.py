@@ -1,26 +1,27 @@
 """Bodovani prinosu: vahy priorit, spolecny prinos mnoziny, staleness."""
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 
-from scoring import (PRIORITIES, PRIORITY_WEIGHTS, build_route_context,
+from scoring import (PERIODS, PRIORITIES, PRIORITY_WEIGHTS, STALE_ONLY_PRIORITY,
+                     STALENESS_FRESH_DAYS, _staleness_bonus, build_route_context,
                      evaluate_tile_set, find_tile_opportunities)
 
 TODAY = date(2026, 7, 29)
 OLD = datetime(2020, 1, 1)
 
 
-def context_for(all_tiles, year_tiles=None, recent_tiles=None, last_visit=OLD):
-    """Kontext ze tri obdobi; year/recent defaultne kopiruji all."""
-    def db(tiles):
-        return {tile: {"last_visit": last_visit, "first_visit": last_visit,
-                       "visit_count": 1} for tile in tiles}
+def db(tiles, last_visit=OLD):
+    return {tile: {"last_visit": last_visit, "first_visit": last_visit,
+                   "visit_count": 1} for tile in tiles}
 
+
+def context_for(all_tiles, year_tiles=None, last_visit=OLD):
+    """Kontext z obou obdobi; year defaultne kopiruje all."""
     return build_route_context(
         {
-            "all": db(all_tiles),
-            "year": db(all_tiles if year_tiles is None else year_tiles),
-            "recent": db(all_tiles if recent_tiles is None else recent_tiles),
+            "all": db(all_tiles, last_visit),
+            "year": db(all_tiles if year_tiles is None else year_tiles, last_visit),
         },
         today=TODAY,
     )
@@ -28,13 +29,19 @@ def context_for(all_tiles, year_tiles=None, recent_tiles=None, last_visit=OLD):
 
 def test_priority_weights_keep_period_order():
     """Nejslabsi priorita delsiho obdobi musi prebit nejsilnejsi priorita
-    kratsiho - jinak by 3mesicni metriky prehlusily celkove."""
+    kratsiho - jinak by letosni metriky prehlusily celkove."""
     assert PRIORITY_WEIGHTS["all_unvisited"] > PRIORITY_WEIGHTS["year_square"]
-    assert PRIORITY_WEIGHTS["year_unvisited"] > PRIORITY_WEIGHTS["recent_square"]
+
+
+def test_the_three_month_period_is_gone():
+    """Plovouci 3mesicni okno se nedalo cilene zlepsovat (square novym behem
+    naroste, ale jinde dlazdice z okna vypadne) - opakovani hlida stari."""
+    assert PERIODS == ("all", "year")
+    assert {period for _key, _label, period, _kind, _weight in PRIORITIES} == set(PERIODS)
 
 
 def test_priority_weights_keep_kind_order_inside_period():
-    for period in ("all", "year", "recent"):
+    for period in PERIODS:
         assert (PRIORITY_WEIGHTS[f"{period}_square"]
                 > PRIORITY_WEIGHTS[f"{period}_cluster"]
                 > PRIORITY_WEIGHTS[f"{period}_unvisited"])
@@ -50,7 +57,6 @@ def test_unvisited_tile_counts_in_every_period():
     result = evaluate_tile_set({(5, 5)}, context_for({(0, 0)}))
     assert result["gains"]["all_unvisited"] == 1
     assert result["gains"]["year_unvisited"] == 1
-    assert result["gains"]["recent_unvisited"] == 1
 
 
 def test_set_gain_is_not_additive_over_tiles():
@@ -83,17 +89,75 @@ def test_square_is_weighted_by_area_not_side():
 
 
 def test_staleness_stays_below_priority_resolution():
-    """Bonus za stari nesmi prehodit poradi dane prioritami (min. rozestup 2)."""
+    """Bonus za stari nesmi prehodit poradi dane prioritami: ani plny bonus
+    nevyvazi jedinou letos novou dlazdici."""
     never_visited = evaluate_tile_set({(9, 9)}, context_for({(0, 0)}))
     assert never_visited["staleness"] == pytest.approx(1.0)
-    assert never_visited["staleness"] < 2
+    assert never_visited["staleness"] < min(PRIORITY_WEIGHTS.values())
+
+
+def test_staleness_grows_with_age_and_saturates():
+    ages = [0, 1, 7, 30, 90, 365, 3 * 365, 10 * 365]
+    bonuses = [_staleness_bonus(days) for days in ages]
+    assert bonuses == sorted(bonuses)
+    assert bonuses[0] == 0.0
+    assert bonuses[-2] == pytest.approx(1.0) and bonuses[-1] == pytest.approx(1.0)
+    assert _staleness_bonus(None) == 1.0
+
+
+def test_freshly_run_tiles_are_worth_nothing():
+    """Nulova zona: kratky okruh nema duvod vest pres to, co se nedavno probehlo.
+    Cisty logaritmus daval 3 tydny stare dlazdici pres pul ctvrtletni hodnoty
+    a okruhy se tim opakovaly (mereno: 6 z 11 dlazdic z poslednich 3 tydnu)."""
+    assert _staleness_bonus(1) == 0.0
+    assert _staleness_bonus(STALENESS_FRESH_DAYS) == 0.0
+    assert _staleness_bonus(STALENESS_FRESH_DAYS + 1) > 0.0
+
+
+def test_staleness_is_logarithmic_after_the_fresh_zone():
+    """Rozdil mezi rokem a tremi lety uz tolik neznamena (linearne trojnasobek)."""
+    year, three_years = _staleness_bonus(365), _staleness_bonus(3 * 365)
+    assert three_years / year < 1.5
+    quarter, half = _staleness_bonus(91), _staleness_bonus(182)
+    assert half - quarter > three_years - _staleness_bonus(2 * 365)
+
+
+def test_route_over_old_tiles_beats_route_over_last_weeks_tiles():
+    """Stejny pocet dlazdic bez jakekoli priority: rozhodne stari."""
+    tiles = {(x, 0) for x in range(6)}
+    recent = datetime(2026, 7, 29) - timedelta(days=STALENESS_FRESH_DAYS)
+    spring = datetime(2026, 4, 1)
+    fresh = build_route_context({"all": db(tiles, recent), "year": db(tiles, recent)},
+                                today=TODAY)
+    older = build_route_context({"all": db(tiles, spring), "year": db(tiles, spring)},
+                                today=TODAY)
+    assert evaluate_tile_set(tiles, older)["total"] > 0
+    assert evaluate_tile_set(tiles, fresh)["total"] == 0
+
+
+def test_visited_tiles_without_priority_are_stale_only_candidates():
+    """V dosahu domova je vse letos navstivene - bez techto kandidatu by okruh
+    nemel podle ceho planovat. Dnes probehnuta dlazdice cenu nema."""
+    tile_db = {
+        (0, 0): {"last_visit": datetime(2026, 5, 1), "first_visit": OLD, "visit_count": 3},
+        (1, 0): {"last_visit": datetime(2026, 7, 29), "first_visit": OLD, "visit_count": 1},
+    }
+    opportunities = {
+        tuple(item["tile"]): item
+        for item in find_tile_opportunities({"all": tile_db, "year": tile_db}, today=TODAY)
+    }
+    candidate = opportunities[(0, 0)]
+    assert candidate["stale_only"] and not candidate["reasons"]
+    assert candidate["priority"] == STALE_ONLY_PRIORITY
+    assert candidate["score"] == pytest.approx(_staleness_bonus(89), abs=1e-3)
+    assert (1, 0) not in opportunities  # cerstva - v nulove zone
+    frontier = opportunities[(2, 0)]
+    assert not frontier["stale_only"] and frontier["reasons"]
 
 
 def test_opportunities_are_ranked_by_score():
     tile_db = {(0, 0): {"last_visit": OLD, "first_visit": OLD, "visit_count": 1}}
-    opportunities = find_tile_opportunities(
-        {"all": tile_db, "year": tile_db, "recent": tile_db}, today=TODAY
-    )
+    opportunities = find_tile_opportunities({"all": tile_db, "year": tile_db}, today=TODAY)
     assert opportunities
     scores = [item["score"] for item in opportunities]
     assert scores == sorted(scores, reverse=True)

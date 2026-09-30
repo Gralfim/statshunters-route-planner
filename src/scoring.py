@@ -1,3 +1,4 @@
+import math
 from datetime import date
 
 from cluster import find_largest_cluster
@@ -5,13 +6,31 @@ from geojson import tile_xy
 from square import find_largest_square
 
 
+# Obdobi, ve kterych se statistiky zlepsuji. Drive i "posledni 3 mesice" -
+# vypusteno (uzivatel 2026-09-30): plovouci kratke okno se nedalo cilene
+# zlepsovat (novy beh square zvetsi, ale jinde dlazdice z okna vypadne).
+# Aby lokalni okruhy nebyly repetitivni, stara se o to bonus za stari.
+PERIODS = ("all", "year")
+
+# Stari posledni navstevy: dlazdice probehnuta v poslednich STALENESS_FRESH_DAYS
+# nema cenu zadnou (tim se hlida, aby se kratke okruhy neopakovaly), pak cena
+# roste LOGARITMICKY do 3 let - rozdil mezi rokem a tremi lety uz tolik
+# neznamena (linearne by byl trojnasobny).
+#   mesic 0,00 | 3 mesice 0,31 | pul roku 0,50 | rok 0,69 | 2 roky 0,89 | 3 roky 1
+# Nulova zona je nutna, ne kosmetika. Cisty logaritmus log(1 + dny/tau) roste
+# nejrychleji hned na zacatku: dlazdice probehnuta pred 3 tydny mela pres pul
+# hodnoty ctvrtletni, takze okruh radeji protnul vic cerstvych dlazdic, nez aby
+# zajel pro starsi. Mereno na okruhu 15 +- 3 km z Karlova nam. den po behu
+# (22. 8. 2026): tau 7, 30 i 90 dni dalo 6 z 11 dlazdic probehnutych za posledni
+# 3 tydny, s nulovou zonou 30 dni jedinou.
 STALENESS_CAP_DAYS = 3 * 365
+STALENESS_FRESH_DAYS = 30
 
 # Vahy: pomer 4:2:1 uvnitr obdobi (square : cluster : nenavstiveny) a 16x mezi
-# obdobimi - vyrazny odstup celkove > letosni > 3mesicni dle preference
-# uzivatele (2026-07-19), aby napr. rust rocniho clusteru prevazil 3mesicni
-# square. Vahy se nasobi velikosti zisku (square plochou side^2 - baseline^2).
-# Minimalni vaha 2 drzi staleness bonus (<= 1) pod rozlisovaci schopnosti priorit.
+# obdobimi - vyrazny odstup celkove > letosni dle preference uzivatele
+# (2026-07-19). Vahy se nasobi velikosti zisku (square plochou side^2 - baseline^2).
+# Nejmensi vaha (32) drzi soucet staleness bonusu (<= 1 za dlazdici) pod jednou
+# letos novou dlazdici - stari rozhoduje jen tam, kde zadna priorita nezabira.
 PRIORITIES = [
     ("all_square", "Zvetsi celkovy max square", "all", "square", 2048),
     ("all_cluster", "Zvetsi celkovy max cluster", "all", "cluster", 1024),
@@ -19,12 +38,15 @@ PRIORITIES = [
     ("year_square", "Zvetsi letosni max square", "year", "square", 128),
     ("year_cluster", "Zvetsi letosni max cluster", "year", "cluster", 64),
     ("year_unvisited", "Letos nenavstiveny tile", "year", "unvisited", 32),
-    ("recent_square", "Zvetsi 3mesicni max square", "recent", "square", 8),
-    ("recent_cluster", "Zvetsi 3mesicni max cluster", "recent", "cluster", 4),
-    ("recent_unvisited", "Za posledni 3 mesice nenavstiveny tile", "recent", "unvisited", 2),
 ]
 
 PRIORITY_WEIGHTS = {key: weight for key, _label, _period, _kind, weight in PRIORITIES}
+
+# Kandidat bez jakekoli priority - ma cenu jen podle stari posledni navstevy.
+# Pro planovani nutny (v dosahu domova je vse letos navstivene), ale do mapy
+# ani do itinerare jako "doporuceni" nepatri: byla by to kazda dlazdice.
+STALE_ONLY_PRIORITY = len(PRIORITIES) + 1
+STALE_ONLY_LABEL = "Jen stari posledni navstevy"
 
 
 def _tile_set(tile_db):
@@ -33,11 +55,15 @@ def _tile_set(tile_db):
 
 def _staleness_bonus(days_since_visit):
     """Bonus 0..1 za stari posledni navstevy — cisty prinos tile, zadne naklady
-    na cestu. Drzi se pod 2, coz je minimalni rozestup mezi ruznymi kombinacemi
-    priorit, takze meni poradi jen mezi tiles se shodnymi prioritami."""
+    na cestu. Nula pro cerstve dlazdice, pak logaritmicky (viz
+    STALENESS_FRESH_DAYS) - tak se lokalni okruhy neopakuji."""
     if days_since_visit is None:
         return 1.0
-    return min(max(days_since_visit, 0) / STALENESS_CAP_DAYS, 1.0)
+    if days_since_visit <= STALENESS_FRESH_DAYS:
+        return 0.0
+    ratio = math.log(days_since_visit / STALENESS_FRESH_DAYS) / math.log(
+        STALENESS_CAP_DAYS / STALENESS_FRESH_DAYS)
+    return min(ratio, 1.0)
 
 
 def _period_baseline(tiles):
@@ -58,29 +84,19 @@ def _frontier_tiles(tiles):
 
 
 def _candidate_tiles(period_tiles):
-    all_tiles = period_tiles["all"]
-    year_tiles = period_tiles["year"]
-    recent_tiles = period_tiles["recent"]
-
-    candidates = set()
+    """Hranicni dlazdice vsech obdobi (roste tam cluster/square, pribyva nova
+    dlazdice) plus VSECHNY uz navstivene - i bez priority maji cenu podle stari
+    posledni navstevy. Bez nich by okruh v okoli domova, kde je vse letos
+    navstivene, nemel jedineho kandidata."""
+    candidates = set(period_tiles["all"])
     for tiles in period_tiles.values():
         candidates.update(_frontier_tiles(tiles))
-
-    candidates.update(all_tiles - year_tiles)
-    candidates.update(all_tiles - recent_tiles)
     return candidates
 
 
 def _visit_status(tile, period_tiles):
-    visited_periods = {
-        period: tile in tiles
-        for period, tiles in period_tiles.items()
-    }
-    missing_periods = [
-        period
-        for period in ("all", "year", "recent")
-        if not visited_periods[period]
-    ]
+    visited_periods = {period: tile in period_tiles[period] for period in PERIODS}
+    missing_periods = [period for period in PERIODS if not visited_periods[period]]
     return visited_periods, missing_periods
 
 
@@ -180,10 +196,7 @@ def _measure_gain(tile, baseline, metric):
 
 def build_route_context(period_tile_dbs, today=None):
     """Predpocitane podklady pro vyhodnocovani prinosu mnoziny tiles."""
-    period_tiles = {
-        period: _tile_set(tile_db)
-        for period, tile_db in period_tile_dbs.items()
-    }
+    period_tiles = {period: _tile_set(period_tile_dbs[period]) for period in PERIODS}
     baselines = {
         period: _period_baseline(tiles)
         for period, tiles in period_tiles.items()
@@ -266,10 +279,7 @@ def find_tile_opportunities(period_tile_dbs, today=None):
         tile_xy(tile): rec["last_visit"]
         for tile, rec in period_tile_dbs["all"].items()
     }
-    period_tiles = {
-        period: _tile_set(tile_db)
-        for period, tile_db in period_tile_dbs.items()
-    }
+    period_tiles = {period: _tile_set(period_tile_dbs[period]) for period in PERIODS}
     baselines = {
         period: _period_baseline(tiles)
         for period, tiles in period_tiles.items()
@@ -304,18 +314,20 @@ def find_tile_opportunities(period_tile_dbs, today=None):
                     "gain": gains.get(key, 1),
                 })
 
-        if not reasons:
-            continue
-
         last_visit = last_visits.get(tile)
         days_since_visit = (today - last_visit.date()).days if last_visit else None
+        staleness = _staleness_bonus(days_since_visit)
 
-        first_reason = reasons[0]
+        # Bez priority zbyva jen stari - dlazdice probehnuta dnes nema cenu zadnou.
+        if not reasons and staleness <= 0:
+            continue
+
         opportunities.append({
             "tile": tile,
-            "score": round(score + _staleness_bonus(days_since_visit), 3),
-            "priority": first_reason["priority"],
-            "top_reason": first_reason["label"],
+            "score": round(score + staleness, 3),
+            "priority": reasons[0]["priority"] if reasons else STALE_ONLY_PRIORITY,
+            "top_reason": reasons[0]["label"] if reasons else STALE_ONLY_LABEL,
+            "stale_only": not reasons,
             "last_visit": last_visit.date().isoformat() if last_visit else None,
             "days_since_visit": days_since_visit,
             "visited_periods": visited_periods,
