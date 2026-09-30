@@ -91,7 +91,7 @@ resp. `/api/expedition`).
 | `src/load.py`, `src/models.py` | načtení JSON exportů → `Activity`, `Tile` |
 | `src/tiles.py` | tile databáze (visit_count, first/last_visit) s filtrem podle období |
 | `src/frontier.py` | hraniční tiles (nenavštívení sousedé navštívených) |
-| `src/cluster.py` | největší 4-souvislý cluster navštívených tiles |
+| `src/cluster.py` | max cluster podle StatsHunters: největší 4-souvislá skupina tiles, které mají navštívené všechny 4 sousedy |
 | `src/square.py` | největší plně pokrytý čtverec (DP) |
 | `src/scoring.py` | bodování kandidátních tiles: 9 priorit (square/cluster/nenavštívený × 3 období) + bonus za stáří poslední návštěvy |
 | `src/statshunters.py` | klient StatsHunters share API — stránkované stahování aktivit do `data/` |
@@ -234,6 +234,17 @@ Skóre tile má dvě složky:
    | bonus | 0 | 0,31 | 0,50 | 0,69 | 0,89 | 1 |
 
    Bonus je menší než nejmenší váha priority (32), takže o trase rozhoduje jen tam, kde žádná priorita nezabírá — typicky na okruzích z domova, kde je v dosahu všechno letos navštívené. Tam je to jediné, co brání opakování. Tiles, které mají **jen** bonus za stáří (`stale_only`), jsou kandidáty pro plánování, ale v mapě ani v itineráři se jako doporučení neukazují (byla by to každá navštívená dlaždice) — pokud na ně trasa přímo nemíří.
+
+**Definice clusteru (09/2026).** Do clusteru patří jen tile, který má navštívené **všechny 4
+sousedy** (definice StatsHunters i VeloViewer); max cluster je největší 4-souvislá skupina takových
+tiles. Dřív se bral každý navštívený tile a cluster byl prostá souvislá komponenta — vyšlo
+**467 proti 256**, které ukazuje profil na StatsHunters (897 tiles; nová definice dává přesně 256).
+Nešlo jen o číslo v panelu: s prostou komponentou zvětšil cluster *každý* soused navštíveného
+území, takže priorita „zvětši cluster" se kryla s „nenavštívený tile" a letošní cluster se rovnal
+všem letošním tiles (178, správně 126). Skutečný cluster roste **vyplněním děr** (díra bere
+clusteru sebe i 4 sousedy, její vyplnění dá až +5 a může spojit dvě skupiny) a **druhou řadou**
+za okrajem — jedna řada podél okraje ho nezvětší vůbec. Důvod „zvětší cluster" má teď 42 tiles
+celkově a 30 letos místo každého tile na okraji.
 
 **Proč už ne 3 měsíce (09/2026).** Dřív existovalo třetí období „posledních 3 měsíců" s vahami 8/4/2. Bylo plovoucí a krátké, takže se nedalo cíleně zlepšovat: novým během se jeho square zvětšil, ale jinde z okna mezitím dlaždice vypadla. Jeho skutečná role — neposílat krátké okruhy tam, kde se nedávno běželo — přešla na bonus za stáří.
 
@@ -658,7 +669,7 @@ pytest -m slow         # kontrolní měření na skutečném grafu Prahy (~1 min
 
 | Soubor | Co hlídá |
 |---|---|
-| `tests/test_metrics.py` | max square a max cluster (4-sousednost, díry, prázdná množina) |
+| `tests/test_metrics.py` | max square a max cluster (jen tiles obklopené ze 4 stran, rada tiles cluster nemá, 4-sousednost, díra a její vyplnění, prázdná množina) |
 | `tests/test_scoring.py` | pořadí vah priorit, neaditivita zisků nad množinou, square vážený plochou, tvar a strop bonusu za stáří, kandidáti „jen stáří" |
 | `tests/test_cost_model.py` | pořadí preferencí typů cest + kontext: chodník podél rušné ulice prohrává s klidnou ulicí, značka je bonus, kontext hranu nikdy nezlevní |
 | `tests/test_itinerary.py` | kilometráž kroků i orientačních bodů, souběžná ulice není křížení, deduplikace napříč kroky, žádné „rovne"; sběr dlaždic (hloubka průniku, každý sběr právě jednou), odstupňování odboček, rozhodovací body; slučování nesmí spolknout ulici (zacelení mezer, prahy úseků), rozsah platnosti značky |

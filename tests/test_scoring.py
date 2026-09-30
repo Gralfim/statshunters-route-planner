@@ -74,18 +74,32 @@ def test_set_gain_is_not_additive_over_tiles():
 
 
 def test_square_is_weighted_by_area_not_side():
-    """Rust strany square (vzacny) musi prebit rust clusteru o par tiles."""
+    """Rust strany square (vzacny) musi prebit rust clusteru o par tiles.
+
+    Blok 4x4 ma cluster 2x2. Dva sloupce vedle nej cluster zvetsi o 4 (blok 6x4
+    ma cluster 4x2), square ale necha na 4. L-ko kolem rohu udela square 5x5."""
     base = {(x, y) for x in range(4) for y in range(4)}
     context = context_for(base)
 
     grow_square = {(x, 4) for x in range(5)} | {(4, y) for y in range(5)}
-    square_total = evaluate_tile_set(grow_square, context)["total"]
+    square = evaluate_tile_set(grow_square, context)
 
-    grow_cluster = {(x, 10) for x in range(10)}
-    cluster_total = evaluate_tile_set(grow_cluster, context)["total"]
+    grow_cluster = {(x, y) for x in (4, 5) for y in range(4)}
+    cluster = evaluate_tile_set(grow_cluster, context)
 
-    assert evaluate_tile_set(grow_square, context)["gains"]["all_square"] == 1
-    assert square_total > cluster_total
+    assert square["gains"]["all_square"] == 1
+    assert cluster["gains"]["all_cluster"] == 4 and cluster["gains"]["all_square"] == 0
+    assert square["total"] > cluster["total"]
+
+
+def test_filling_a_hole_grows_the_cluster_by_more_than_one():
+    """Dira ubira clusteru i ctyri sousedy - jedina dlazdice tu da +8, zatimco
+    dlazdice na okraji uzemi cluster nezvetsi vubec (s drivejsi definici to bylo
+    naopak: kazdy soused navstiveneho uzemi +1)."""
+    around_hole = {(x, y) for x in range(5) for y in range(5)} - {(2, 2)}
+    context = context_for(around_hole)
+    assert evaluate_tile_set({(2, 2)}, context)["gains"]["all_cluster"] == 8
+    assert evaluate_tile_set({(5, 2)}, context)["gains"]["all_cluster"] == 0
 
 
 def test_staleness_stays_below_priority_resolution():
