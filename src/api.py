@@ -17,7 +17,8 @@ from frontier import frontier_tiles
 from geojson import feature_collection, tile_feature, tile_outline_feature_collection
 from load import load_activities
 from routeplan import plan_tile_loop, route_to_gpx
-from scoring import PERIODS, build_route_context, find_tile_opportunities
+from scoring import (PERIODS, STALENESS_FRESH_DAYS, _staleness_bonus, build_route_context,
+                     find_tile_opportunities)
 from square import find_largest_square
 from statshunters import resolve_share_link, sync_activities
 from tiles import build_tile_database
@@ -94,7 +95,9 @@ def period_definitions(today=None):
             "label": f"Rok {today.year}",
             "start_date": date(today.year, 1, 1),
             "end_date": today,
-            "color": "#eda100",
+            # prostredni stupen oranzove skaly, kterou mapa barvi letosni
+            # dlazdice podle stari (web/app.js, RECENCY_STEPS)
+            "color": "#d74b01",
         },
     }
 
@@ -117,13 +120,18 @@ def _visited_tiles(period_key="all"):
     return list(get_period_tile_database(period_key).keys())
 
 
-def _tile_props(tile, rec):
+def _tile_props(tile, rec, today=None):
+    # Stari a bonus za nej primo ze scoringu: mapa jimi barvi letosni dlazdice
+    # a nesmi ukazovat jinou cenu, nez s jakou pocita planovac.
+    days = ((today or date.today()) - rec["last_visit"].date()).days
     return {
         "x": tile.x,
         "y": tile.y,
         "visit_count": rec["visit_count"],
         "first_visit": rec["first_visit"].date().isoformat(),
         "last_visit": rec["last_visit"].date().isoformat(),
+        "days_since_visit": days,
+        "staleness": round(_staleness_bonus(days), 3),
     }
 
 
@@ -186,6 +194,7 @@ def summary():
         "expedition_budget_min": config.get("expedition_budget_min", 120),
         "run_pace_min_per_km": config.get("run_pace_min_per_km", 6.0),
         "quiet_weight": config.get("quiet_weight", 0.6),
+        "staleness_fresh_days": STALENESS_FRESH_DAYS,
         "periods": periods,
     }
 

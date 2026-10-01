@@ -36,9 +36,9 @@ def planned_route():
     from api import get_period_tile_database
     from routeplan import plan_tile_loop
     from scoring import PERIODS, build_route_context, find_tile_opportunities
-    from waygraph import load_walk_graph
+    from waygraph import cached_graph_paths, load_walk_graph
 
-    if not any((ROOT / "data").glob("walk_*km.graphml")):
+    if not any(cached_graph_paths()):
         pytest.skip("v data/ neni zadny stazeny pesi graf")
 
     reach_km = (DISTANCE_KM + TOLERANCE_KM) / 2 + 0.5
@@ -234,9 +234,16 @@ def test_quiet_end_wins_on_its_own_objective(slider_ends):
     po znackach, z Prokopskeho udoli 16,7 % -> 2,9 % pri 27,0 % -> 23,4 %.
     Slozeny efekt je v obou pripadech jasne kladny - a to je to, co se ma drzet.
     Ze znacka sama o sobe skore zvedne, hlida test_objective.
+
+    Neostre (>=): v centru mesta muze jedna trasa vest v prinosu i v kvalite
+    zaroven a pak ji vyberou oba konce posuvniku (09/2026: prinos 4,10 proti
+    2,46 u nejklidnejsi varianty). Vyhnout se rusnym ulicim tu jde i v
+    "hlucnejsi" variante, takze to je spravny vysledek, ne nefunkcni posuvnik
+    (uzivatel to tak potvrdil). Hlidat se ma, ze klidny konec nikdy nedopadne
+    HUR v tom, co sam meri.
     """
     quiet, loud = slider_ends[1.0], slider_ends[0.0]
-    assert quality(quiet, 1.0) > quality(loud, 1.0), (
+    assert quality(quiet, 1.0) >= quality(loud, 1.0) - 1e-9, (
         f"plny klid: {100*quiet['along_major_share']:.1f} % hlavnich ulic / "
         f"{100*quiet['trail_share']:.1f} % znacek -> {quality(quiet, 1.0):.3f}; "
         f"nulovy: {100*loud['along_major_share']:.1f} % / "
@@ -244,11 +251,21 @@ def test_quiet_end_wins_on_its_own_objective(slider_ends):
     )
 
 
-def test_slider_ends_give_visibly_different_routes(slider_ends):
+def test_full_quiet_offers_a_visibly_quieter_route(slider_ends):
     """Uzivatelska stiznost, kvuli ktere clen za znacene trasy vznikl: 'zadne
-    rozdily nevidim'. Krajni polohy posuvniku musi dat jinou trasu, ne tutez
-    o par metru - meri se podilem SPOLECNYCH metru."""
+    rozdily nevidim'. Drive se tu tvrdilo, ze krajni polohy posuvniku musi
+    VYBRAT jinou trasu. To neplati, kdyz jedna trasa vede v prinosu i kvalite
+    (viz test_quiet_end_wins_on_its_own_objective) - ale klidna trasa musi byt
+    pri plnem klidu aspon na vyber mezi variantami, a doopravdy jina (meri se
+    podilem SPOLECNYCH bodu), ne tataz o par metru."""
     quiet, loud = slider_ends[1.0], slider_ends[0.0]
-    shared = set(map(tuple, quiet["coordinates"])) & set(map(tuple, loud["coordinates"]))
-    overlap = len(shared) / len(quiet["coordinates"])
-    assert overlap < 0.8, f"krajni polohy posuvniku sdileji {100*overlap:.0f} % bodu trasy"
+    offered = [quiet] + quiet.get("variants", [])
+    quietest = max(offered, key=lambda route: quality(route, 1.0))
+    assert quality(quietest, 1.0) > quality(loud, 1.0) + 0.05, (
+        f"nejklidnejsi nabidnuta: {100*quietest['along_major_share']:.1f} % hlavnich ulic / "
+        f"{100*quietest['trail_share']:.1f} % znacek; vitez pri nulovem klidu: "
+        f"{100*loud['along_major_share']:.1f} % / {100*loud['trail_share']:.1f} %"
+    )
+    shared = set(map(tuple, quietest["coordinates"])) & set(map(tuple, loud["coordinates"]))
+    overlap = len(shared) / len(quietest["coordinates"])
+    assert overlap < 0.8, f"klidna varianta sdili s hlucnou trasou {100*overlap:.0f} % bodu"

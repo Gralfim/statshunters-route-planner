@@ -190,13 +190,33 @@ neobjeví — je potřeba smazat `data/pid_gtfs.zip` a `data/transit_graph.json`
 
 ### Barvy na mapě
 
-Každý navštívený tile se kreslí jednou, barvou podle **období poslední návštěvy** (studená → teplá):
-modrá `#2a78d6` = naposledy před letoškem, žlutá `#eda100` = letos. (Třetí, červená vrstva
-„poslední 3 měsíce" byla 09/2026 zrušena spolu s tím obdobím — viz skóre níže.) Doporučené
-tiles: fialová výplň `#4a3aa7` u dosud
-nenavštívených; doporučení na už navštíveném tile má jen tmavý obrys bez výplně, aby
-nepřekrylo barvu jeho období (tu informaci nese sám tile). Paleta je ověřená validátorem
-na rozlišitelnost včetně barvosleposti (ΔE ≥ 15,3, cíl ≥ 8). Obrysy max
+Každý navštívený tile se kreslí jednou, barvou podle toho, **kdy byl naposledy navštíven**
+(studená → teplá): modrá `#2a78d6` = před letoškem; **letošní tiles jsou odstupňované podle stáří
+poslední návštěvy**, tedy podle té složky ceny, podle které plánovač vybírá okruhy z domova
+(bonus za stáří, viz skóre níže):
+
+| třída | barva | krytí | bonus za stáří |
+|---|---|---|---|
+| do 30 dní (`STALENESS_FRESH_DAYS`) | `#8e2e00` | 0,60 | 0 |
+| 1–3 měsíce | `#d74b01` | 0,45 | 0–0,31 |
+| starší letos | `#ff8d65` | 0,32 | 0,31+ |
+| před letoškem | `#2a78d6` | 0,32 | — |
+
+Stáří i bonus posílá API u každého tile (`days_since_visit`, `staleness`) přímo ze `scoring`,
+aby mapa nikdy neukazovala jinou cenu, než s jakou počítá plánovač; popup tile je uvádí. Tmavší =
+čerstvější navazuje na dřívější „červená = nedávno". Rampa je jeden odstín a prošla ordinálními
+kontrolami validátoru (monotónní světlost, krok ≥ 0,06, světlý konec 2,21 : 1 proti povrchu).
+**Krytí se stupňuje spolu s barvou**: dlaždice leží poloprůhledně přes podkladovou mapu a při
+jednotném krytí 0,32 vyšel rozdíl sousedních stupňů po smíchání s podkladem (zástavba, les, voda,
+bílá) jen ΔE 4,4 (cíl ≥ 8); s odstupňovaným 11,2, při barvosleposti 10,6. Nejstarší letošní stupeň
+má krytí jako dosud, takže mapa pod většinou dlaždic zůstává stejně čitelná. Nejslabší dvojice je
+nejstarší letošní stupeň proti modré (v nejhorším případě ΔE 7,3, pásmo, kde musí pomoct legenda
+a popup — proto oba uvádějí třídu i cenu). (Dřívější třetí, červená vrstva „poslední 3 měsíce"
+byla 09/2026 zrušena spolu s tím obdobím.) Barva období „letos" ve statistikách a v obrysech je
+prostřední stupeň rampy.
+
+Doporučené tiles: fialová výplň `#4a3aa7` u dosud nenavštívených; doporučení na už navštíveném tile
+má jen tmavý obrys bez výplně, aby nepřekrylo barvu jeho stáří (tu informaci nese sám tile). Obrysy max
 clusteru (čárkovaně) a max square (plně) používají barvu svého období a jsou neklikatelné,
 aby nepřekrývaly popupy tiles a doporučení.
 
@@ -282,14 +302,28 @@ python src/routeplan.py --lat 50.1030 --lon 14.4500 --distance 10 --tolerance 2
 Jak to funguje:
 
 1. **Pěší graf OSM** (`src/waygraph.py`) se stáhne z Overpass API kolem startu (poprvé
-   jednotky minut) a cachuje do `data/walk_<lat>_<lon>_<reach>km.graphml`. Nad tím jsou
-   ještě dvě vrstvy cache:
+   jednotky minut) a cachuje do `data/walk2_<lat>_<lon>_<reach>km.graphml`.
+
+   **Obsah grafu (`WALK_FILTERS`)** = filtr `walk` z osmnx 2.1 beze změny **plus cyklostezky,
+   kam smí chodci** (`highway=cycleway` s `foot=yes|designated|permissive`). Samotný filtr
+   `walk` vyřazuje `highway=cycleway` vždy — i společnou stezku pro chodce a cyklisty, která je
+   v Česku běžná a pro běh často nejlepší (údolí, podél vody, mimo provoz). Graf pak neměl ani
+   metr cyklostezek, takže nejvyšší preference běhu (`cycleway` 0,60) nikdy nezabrala. Naměřeno
+   na ruční trase Stodůlky → Barrandov: 14 % délky vedlo mimo graf a každý takový úsek byl
+   `cycleway` + `foot=designated` (podél Poncarovy, kde silnice sama má `foot=no`); plánovač
+   tytéž dlaždice prošel za **26,5 km místo 17,1 km**. Čistá cyklostezka (značka C8, bez
+   `foot`) v grafu není — chodec tam nepatří. `network_type="walk"` zůstává kvůli
+   obousměrnosti (jednosměrky se proběhnou oběma směry).
+
+   Předpona souboru (`walk2_`, `GRAPH_PREFIX`) je **verze obsahu**: cache je podle pokrytí,
+   takže graf stažený se starým filtrem by se jinak tiše používal dál. Staré soubory `walk_*`
+   se už nečtou a dají se smazat. Nad grafem jsou ještě dvě vrstvy cache:
    - Cache graphml je podle **pokrytí**: použije se jakýkoli uložený graf, jehož kruh pokrývá
      požadovaný start + dosah (s tolerancí 1,5 km — dosah je horní odhad a chybějící vnější
      lem trasu nerozbije); stahuje se velkoryse (min. 10 km), takže změna délky ani startu
      v okolí nevyvolá nové stahování.
    - **Připravený graf** (názvy ulic, značené trasy, ceny hran) se ukládá jako
-     `data/walk_*.prepared-<otisk>.pkl`. Parsování graphml trvá ~22 s a příprava dalších
+     `data/walk2_*.prepared-<otisk>.pkl`. Parsování graphml trvá ~22 s a příprava dalších
      ~6 s; z pickle je to **~4 s** (7× rychleji, soubor 79 MB = polovina graphml). V názvu je
      **otisk parametrů**, které přípravu ovlivňují (preference cest, `ALONG_MAJOR_FACTOR`,
      `TRAIL_BONUS`, prahy párování ulic) — po jejich změně se stará cache nenajde a nová
@@ -297,25 +331,63 @@ Jak to funguje:
      tiše plánovalo podle starých cen. Zápis je atomický přes `.tmp`, poškozený soubor se
      zahodí a přepočítá.
    - Načtený graf zůstává v paměti serveru.
-2. **Výběr trasy porovnáním variant**: staví se portfolio okruhů — rank-greedy seed
-   (cheapest insertion na odhadech vzdušná čára × 1,35), seedy kolem **skupin
-   sousedících kandidátů** (4-okolí) a **seedy na dokompletování square** (okna
-   (side+1)² s ≤ 4 chybějícími tiles v dosahu — jednotlivé chybějící tiles mají
-   samy o sobě nulový square přínos, proto je obecné hledání nemá důvod kombinovat).
-   Každá varianta se exaktně přepočítá (`bidirectional_dijkstra` vážená
-   **preferencemi typů cest**: cyklostezka 0,60 > pěšina/turistická cesta 0,70 >
-   pěší zóna 0,80 > chodník 0,85 > klidná ulice 1,0; rušné silnice ×1,35–3,0 a
-   schody ×1,4 penalizované — délková tolerance se ale vždy kontroluje proti
-   skutečným metrům) upravenými o **kontext, ve kterém cesta vede** (viz níže)
-   a ohodnotí **společným přínosem všech protnutých tiles**
-   (`scoring.evaluate_tile_set`): Δsquare a Δcluster se počítají s celou množinou
-   najednou (zisky nejsou aditivní), plus počty nových tiles podle období a
-   staleness bonusy. Váhy: priorita (viz tabulka výše) × velikost zisku, přičemž **square se váží
-   plochou** (side² − baseline²) — bez toho by snadný růst clusteru o pár tiles
-   vždy přebil vzácný růst square a obrátil pořadí priorit. Vítěz se ještě zkouší
-   vylepšit přidáváním nevyužitých kandidátů (2 kola). Při přetečení tolerance
-   odpadá nejslabší waypoint; naopak pokud trasa nedosáhne spodní hranice, dotáhne
-   se přes další tiles v dosahu (`_extend_to_window`).
+2. **Výběr trasy porovnáním variant**: staví se portfolio tras a každá se exaktně
+   přepočítá (`bidirectional_dijkstra` vážená **preferencemi typů cest**: cyklostezka 0,60 >
+   pěšina/turistická cesta 0,70 > pěší zóna 0,80 > chodník 0,85 > klidná ulice 1,0; rušné
+   silnice ×1,35–3,0 a schody ×1,4 penalizované — délková tolerance se ale vždy kontroluje
+   proti skutečným metrům) upravenými o **kontext, ve kterém cesta vede** (viz níže) a
+   ohodnotí **společným přínosem všech protnutých tiles** (`scoring.evaluate_tile_set`):
+   Δsquare a Δcluster se počítají s celou množinou najednou (zisky nejsou aditivní), plus
+   počty nových tiles podle období a bonusy za stáří. Váhy: priorita (viz tabulka výše) ×
+   velikost zisku, přičemž **square se váží plochou** (side² − baseline²) — bez toho by
+   snadný růst clusteru o pár tiles vždy přebil vzácný růst square a obrátil pořadí priorit.
+
+   **Jak se posloupnosti waypointů staví (09/2026).** Přestavěno podle ruční trasy
+   Stodůlky → Barrandov, kterou plánovač nenašel, ani když ji na grafu s cyklostezkami
+   uměl projít (16,9 km). Příčiny a opravy:
+   - **Hodnota kandidáta pro hledání** (`value`) = skóre dlaždice + postup k příštímu
+     square, který by sama přinesla. Dlaždice chybějící ve square okně má skóre jako každá
+     jiná letos nenavštívená (~33), její doplnění ale stojí stovky bodů — hledání ji dřív
+     nemělo proč zkusit.
+   - **Počáteční posloupnosti z různých oblastí** (`_region_seeds`, mřížka 3×3 dlaždice):
+     z každé oblasti nejcennější kandidát, na kterého samotná zajížďka nepřetáhne cíl.
+     Dřív všechny začínaly u týchž čtyř dlaždic na severu a jih se nezkusil ani jednou.
+   - **Plnění podle hodnoty na přidaný kilometr** (`_ratio_fill`), ne podle pořadí skóre —
+     posloupnost roste tam, kde už vede, a nemíchá protilehlé směry (dřív jedna vedla sever
+     i jih zároveň: odhad 16,6 km, skutečně 29 km). Jako doplněk jedna posloupnost
+     v pořadí hodnoty (`_rank_fill`), která jde i za vzdálenější cennou dlaždicí.
+   - **Režie waypointu v odhadu** (`WAYPOINT_OVERHEAD_M` 1,4 km): naměřeno na 68
+     posloupnostech ve třech oblastech — skutečná délka ≈ 0,8–1,0 × odhad + 1,4–1,6 km za
+     každý další waypoint (poměr skutečná/odhad 0,9–1,0 u jednoho waypointu, 1,9–2,5 u osmi).
+     Bez toho se plnilo osm waypointů do rozpočtu, kam se vešly tři.
+   - **Plní se k cílové délce**, ne k horní hranici okna; zbytkovou chybu odhadu měří poměr
+     skutečné a odhadnuté délky z exaktních přepočtů téže úlohy, a když posloupnost vyjde
+     od cíle daleko, postaví se znovu s poměrem změřeným právě na ní.
+   - **Přetečení se opravuje vypuštěním waypointu s nejmenší hodnotou na ušetřený kilometr**
+     (`_drop_order`), ne s nejnižším skóre — při shodě skóre dřív rozhodl bonus za stáří
+     a vypadla celá jižní skupina (sama o sobě 606 bodů).
+   - **Lokální hledání** kolem vítěze (`_local_search`, strop 24 přepočtů): přidat, vypustit,
+     vyměnit waypoint, u okruhu obrátit směr. Hledá se z **pevných vah klidu 0 a 1**
+     (`SEARCH_QUIET_WEIGHTS`), ne z posuvníku — portfolio pak na posuvníku nezávisí a ten
+     jen vybírá (s vahou z posuvníku dávala plná váha klidu trasu s víc metry podél rušných
+     ulic než nulová).
+   - Pokud trasa nedosáhne spodní hranice, dotáhne se přes další tiles v dosahu
+     (`_extend_to_window`); je-li nad cílem, zkusí se zkrátit (`_shrink_toward_target`).
+
+   Naměřeno na šesti scénářích (výchozí váha klidu 0,6; skóre = cílová funkce):
+
+   | scénář | před | po |
+   |---|---|---|
+   | Stodůlky → Barrandov 15 ± 3 (8. 8.) | 209,5 (14,97 km, přínos 291,7) | **449,3** (15,16 km, 356,2 + postup 235,5) |
+   | okruh Stodůlky 12 ± 2 | 215,8 (13,64 km) | **270,3** (13,83 km, přínos 580,6) |
+   | okruh Barrandov 13 ± 2 | 276,1 | 276,1 |
+   | okruh Karlovo nám. 15 ± 3 (22. 8.) | 1,4 (17,67 km) | 1,5 (15,43 km) |
+   | okruh Karlovo nám. 15 ± 3 (30. 9.) | 2,0 (15,51 km) | **2,8** (15,36 km) |
+   | okruh Karlovo nám. 10 ± 2 (30. 9.) | 1,6 (11,60 km) | 1,5 (10,24 km) |
+
+   Ruční trasa uživatele z referenčního případu má 40,3 bodu/km na 17,1 km; plánovač teď
+   39,0 bodu/km na 15,2 km. Okruhy z domova (rozhoduje jen stáří) se liší v řádu šumu
+   heuristiky, ale drží se blíž cílové délce. Plánování trvá 3–12 s (dřív 3–14 s).
 3. **Cílová funkce** (`_variant_score`) — přínos (plus strategický postup, viz níže)
    postupně snižovaný čtyřmi **podílovými** měrkami kvality:
 
@@ -681,6 +753,9 @@ pytest -m slow         # kontrolní měření na skutečném grafu Prahy (~1 min
 | `tests/test_static_cache.py` | statické soubory nesou `Cache-Control: no-cache` a zároveň validátory pro 304 |
 | `tests/test_expedition.py` | časové okno běhu (doběh a jízda ho zkracují, 24minutový strop na spojení), jednosměrný tvar dá širší okno, práh pro blízké cíle, odhad sklizně |
 | `tests/test_graph_cache.py` | cache připraveného grafu: zneplatnění při změně parametrů, round-trip, úklid starých otisků, odolnost proti poškozenému souboru |
+| `tests/test_search.py` | stavba posloupností: režie waypointu v odhadu, plnění nemíchá protilehlé směry a drží rozpočet, poměr vs. pořadí hodnoty, vypouští se nejméně cenné na ušetřený km (ne nejnižší skóre), počáteční dlaždice oblasti musí být dosažitelná, hodnota pro hledání zahrnuje postup k square |
+| `tests/test_map_tiles.py` | dlaždice pro mapu nesou stáří a cenu (bonus za stáří) přímo ze scoringu; čerstvá dlaždice má v mapě cenu 0 stejně jako v plánovači |
+| `tests/test_walk_filter.py` | obsah grafu: společná stezka pro chodce a cyklisty v grafu je, čistá cyklostezka, `foot=no`, soukromé cesty a silnice se samostatnými chodníky ne (filtry se vyhodnocují nad tagy, ne porovnáním řetězců); starý graf bez cyklostezek se z cache nepoužije |
 | `tests/test_square_progress.py` | strategický postup: dokončené okno se nepočítá jako postup (to je zisk), víc doplněných dlaždic je víc, postup nikdy nepřebije skutečné dokončení, hodnota okna odpovídá váze priority |
 | `tests/test_corridor.py` | opakovaný koridor: rovná trasa nic nehlásí, tam-a-zpět počítá oba průchody, **souběžná pěšina se počítá, i když se neopakuje žádná hrana**, vzdálenější ulice ne, ohyb ani krátký slepý ocásek ne |
 | `tests/test_transit_schedule.py` | jízdní řád z GTFS: varianta z jiného období nenafoukne interval, linku popisuje ta varianta, která opravdu jede, zkrácený spoj se nestane tváří linky, výjimky z `calendar_dates.txt`, expirace feedu a platnost cache grafu |

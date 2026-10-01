@@ -2,10 +2,10 @@
 
 Tri vrstvy cache nad sebou:
 
-1. `data/walk_*.graphml` - surovy graf z Overpass. Cache je podle POKRYTI:
+1. `data/walk2_*.graphml` - surovy graf z Overpass. Cache je podle POKRYTI:
    pouzije se jakykoli ulozeny graf, jehoz kruh pokryva pozadovany start a
    dosah, takze zmena delky ani startu v okoli nevyvola nove stahovani.
-2. `data/walk_*.prepared-*.pkl` - tentyz graf uz PRIPRAVENY (nazvy ulic, znacene
+2. `data/walk2_*.prepared-*.pkl` - tentyz graf uz PRIPRAVENY (nazvy ulic, znacene
    trasy, ceny hran). Parsovani graphml trva ~22 s a priprava dalsich ~6 s;
    z pickle je to ~4 s. V nazvu je otisk parametru, ktere pripravu ovlivnuji -
    po zmene preferenci se stary soubor nepouzije.
@@ -38,15 +38,44 @@ TRAIL_MATCH_MAX_M = 35.0
 # Zmenu parametru nize hlida otisk sam.
 PREPARED_CACHE_VERSION = 2  # 2: cyklotrasy bez znaceni v terenu se zahazuji
 
+# Ktere cesty graf obsahuje. Prvni dotaz je beze zmeny filtr `walk` z osmnx 2.1.
+# Ten ale vyrazuje highway=cycleway VZDY - i spolecnou stezku pro chodce
+# a cyklisty (foot=designated), ktera je v CR bezna a pro beh casto nejlepsi
+# (udoli, podel vody, mimo provoz). Graf pak nemel ani metr cyklostezek, takze
+# nejvyssi preference behu (RUN_PREFERENCES["cycleway"]) nikdy nezabrala.
+# Mereno na rucni trase Stodulky -> Barrandov: 14 % delky vedlo mimo graf, kazdy
+# takovy usek byl cycleway + foot=designated (podel Poncarovy, kde silnice sama ma
+# foot=no); planovac tytez dlazdice prosel za 26,5 km misto 17,1 km.
+# Druhy dotaz proto pridava cyklostezky, na ktere chodec SMI - vyslovne
+# foot=yes/designated/permissive. Cista cyklostezka (C8) bez znacky foot
+# chodcum patri neni, ta zustava venku.
+WALK_FILTERS = [
+    '["highway"]["area"!~"yes"]["access"!~"private"]'
+    '["highway"!~"abandoned|bus_guideway|construction|cycleway|motor|no|planned|'
+    'platform|proposed|raceway|razed|rest_area|services"]'
+    '["foot"!~"no"]["service"!~"private"]'
+    '["sidewalk"!~"separate"]["sidewalk:both"!~"separate"]'
+    '["sidewalk:left"!~"separate"]["sidewalk:right"!~"separate"]',
+    '["highway"="cycleway"]["area"!~"yes"]["access"!~"private"]'
+    '["foot"~"^(yes|designated|permissive)$"]',
+]
+# Predpona souboru grafu = verze obsahu. Cache je podle pokryti, takze graf
+# stazeny se starym filtrem by se jinak tise pouzival dal. walk_ = bez cyklostezek.
+GRAPH_PREFIX = "walk2"
+
 
 def graph_path(lat, lon, reach_km):
-    return GRAPH_DIR / f"walk_{lat:.3f}_{lon:.3f}_{reach_km:.1f}km.graphml"
+    return GRAPH_DIR / f"{GRAPH_PREFIX}_{lat:.3f}_{lon:.3f}_{reach_km:.1f}km.graphml"
+
+
+def cached_graph_paths():
+    return GRAPH_DIR.glob(f"{GRAPH_PREFIX}_*km.graphml")
 
 
 def covering_graph_path(lat, lon, reach_km):
     """Najdi ulozeny graf, jehoz oblast pokryva pozadovany kruh (start, reach)."""
     best = None
-    for path in GRAPH_DIR.glob("walk_*km.graphml"):
+    for path in cached_graph_paths():
         try:
             _, cached_lat, cached_lon, cached_reach = path.stem.split("_")
             cached_lat, cached_lon = float(cached_lat), float(cached_lon)
@@ -235,8 +264,11 @@ def load_walk_graph(lat, lon, reach_km):
     if path is None:
         download_reach = max(reach_km, MIN_DOWNLOAD_REACH_KM)
         ox.settings.cache_folder = str(GRAPH_DIR / "osmnx_cache")
+        # network_type="walk" zustava kvuli obousmernosti (jednosmerky se
+        # probehnou obema smery); ktere cesty graf obsahuje, urcuje WALK_FILTERS.
         graph = ox.graph_from_point(
-            (lat, lon), dist=download_reach * 1000, network_type="walk", simplify=True
+            (lat, lon), dist=download_reach * 1000, network_type="walk",
+            custom_filter=WALK_FILTERS, simplify=True,
         )
         path = graph_path(lat, lon, download_reach)
         ox.save_graphml(graph, path)

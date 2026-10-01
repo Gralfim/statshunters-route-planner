@@ -1,14 +1,16 @@
 """Vyber trasy: ktere dlazdice navstivit a v jakem poradi.
 
 Kombinatoricka vrstva nad grafem. Nestavi jednu trasu, ale PORTFOLIO variant
-(rank-greedy seed, seedy kolem skupin sousedicich kandidatu, seedy na
-dokompletovani max square, nizkoopakovaci prepocty) a kazdou exaktne prepocita.
+(posloupnosti z ruznych oblasti plnene podle hodnoty na kilometr, seedy na
+dokompletovani max square, nizkoopakovaci a klidne prepocty) a kazdou exaktne
+prepocita.
 Vitezi ta s nejvyssim spolecnym prinosem vsech protnutych dlazdic - zisky
 square/cluster nejsou aditivni pres jednotlive dlazdice, takze se musi pocitat
 nad celou mnozinou najednou.
 
-Odhady delky (vzdusna cara x DETOUR_FACTOR) slouzi jen k razeni a orezu
-kandidatu; o vysledku vzdy rozhodne exaktni prepocet po grafu.
+Odhady delky (vzdusna cara x DETOUR_FACTOR, kalibrovane pomerem zmerenym na
+exaktnich prepoctech) slouzi jen ke stavbe posloupnosti; o vysledku vzdy
+rozhodne exaktni prepocet po grafu.
 """
 import math
 from pathlib import Path
@@ -25,11 +27,52 @@ ROOT = Path(__file__).resolve().parents[1]
 DETOUR_FACTOR = 1.35
 MAX_WAYPOINTS = 8
 MAX_CANDIDATES = 60
-MAX_GROUP_SEEDS = 8
 MAX_SQUARE_SEEDS = 4
 MAX_SQUARE_MISSING = 4
-IMPROVE_ROUNDS = 2
-IMPROVE_MOVES_PER_ROUND = 10
+# Lokalni hledani kolem vitezze: pridat, vypustit, vymenit waypoint, u okruhu
+# obratit smer. Kazdy tah je exaktni prepocet, proto strop. Drive se vitez
+# zkousel jen prodluzovat - poradi a vymeny zustaly na nahode stavby
+# posloupnosti (okruh z Barrandova: tytez dlazdice jednou jako okruh, jindy
+# tam a zpet po stejne ceste, skore 276 vs 258).
+LOCAL_SEARCH_EVALS = 24
+LOCAL_SEARCH_MOVES = 3  # kolik nejslibnejsich tahu kazdeho druhu
+# Vahy klidu, se kterymi se hleda - PEVNE, ne z posuvniku (stejny princip jako
+# QUIET_LEG_PROFILES): portfolio pak na posuvniku nezavisi a ten jen vybira.
+# Hledani s vahou z posuvniku prohledalo pro kazdou polohu jine okoli (pri
+# plnem klidu vysla trasa s 15,3 % delky podel rusnych ulic, pri nulovem
+# 13,9 %); jen s neutralni vahou zase portfolio nemelo klidne POSLOUPNOSTI,
+# jen klidne prepocty tychz dlazdic, a obe krajni polohy daly tutez trasu.
+SEARCH_QUIET_WEIGHTS = (0.0, 1.0)
+
+# Jak se stavi posloupnosti waypointu (mereno na rucni trase Stodulky ->
+# Barrandov, 08/2026, kterou planovac nenasel ani na grafu, kde ji umel projit):
+#
+# Pocatecni posloupnosti z RUZNYCH OBLASTI. Drive se vsechny stavely v poradi
+# skore dlazdic, takze zacinaly u tychz ctyr dlazdic na severu (96,8 bodu) a jih
+# (dlazdice po ~33, cenne az spolecne) se nezkusil ani jednou. Mrizka po
+# REGION_TILES dlazdicich (~4,7 km) = ruzne smery behu.
+REGION_TILES = 3
+MAX_REGION_SEEDS = 6
+# Plni se podle HODNOTY NA PRIDANY KILOMETR, ne podle poradi skore: posloupnost
+# roste kolem sebe a nemicha protilehle smery (jedna posloupnost drive vedla
+# sever i jih zaroven a exaktne mela 29 km pri odhadu 16,6). Dlazdice, ktere
+# trasa protne skoro zadarmo, by mely nekonecny pomer - pridana delka se proto
+# pocita aspon MIN_INSERT_M.
+MIN_INSERT_M = 200.0
+# Kazdy DALSI waypoint stoji ve skutecnosti ~1,4 km navic, ktere vzdusna cara
+# nevidi (zajizdka do bezpecne zony dlazdice, oklika po siti mezi sousednimi
+# dlazdicemi, kde odhad dava mezeru nula). Mereno na 68 posloupnostech ve trech
+# oblastech (Stodulky -> Barrandov, okruh z Karlova nam., okruh ze Stodulek):
+# skutecna delka = 0,8-1,0 x odhad + 1,40-1,58 km na waypoint; pomer
+# skutecne/odhad byl u jednoho waypointu 0,9-1,0, u osmi 1,9-2,5. Bez tohoto
+# clenu plnilo hledani osm waypointu do rozpoctu, do ktereho se vesly tri, a
+# oprava pretecene trasy je pak musela vyhazet.
+WAYPOINT_OVERHEAD_M = 1400.0
+# Zbytkovou chybu odhadu (teren se lisi smer od smeru) meri pomer skutecne/
+# odhadnute delky z exaktnich prepoctu teze planovaci ulohy. Posloupnost se
+# plni k CILOVE delce (ne k horni hranici okna) delene timto pomerem.
+INITIAL_CALIBRATION = 1.0
+CALIBRATION_BOUNDS = (0.8, 2.0)
 # Cilova funkce trasy je prinos POSTUPNE SNIZOVANY ctyrmi merkami kvality:
 #   skore = prinos x (1 - CORRIDOR x podil delky v opakovanem koridoru)
 #                   x (1 - quiet_weight x podil delky podel vyznamnych ulic)
@@ -276,18 +319,27 @@ def _exact_loop(graph, cache, start_node, waypoint_nodes, end_node=None,
     return total, full_path
 
 
+def _estimate_point(item):
+    """Waypoint pro odhad: stred tile s polomerem (trasa se ho dotkne u okraje)."""
+    return (item["lat"], item["lon"]), TILE_EFFECTIVE_RADIUS_M
+
+
+def _estimate_gap_m(a, b):
+    (point_a, radius_a), (point_b, radius_b) = a, b
+    return DETOUR_FACTOR * max(haversine_m(*point_a, *point_b) - radius_a - radius_b, 0.0)
+
+
+def _estimate_points(start, end, seq):
+    return [(start, 0.0)] + [_estimate_point(item) for item in seq] + [(end, 0.0)]
+
+
 def _estimate_path_m(start, end, seq):
     """Odhad delky trasy. Waypointy maji polomer (trasa se tile dotkne u okraje),
-    start a cil jsou body - jinak odhad systematicky nadhodnocuje."""
-    points = [(start, 0.0)]
-    points += [((item["lat"], item["lon"]), TILE_EFFECTIVE_RADIUS_M) for item in seq]
-    points.append((end, 0.0))
-
-    straight = 0.0
-    for (point, radius), (next_point, next_radius) in zip(points, points[1:]):
-        gap = haversine_m(*point, *next_point) - radius - next_radius
-        straight += max(gap, 0.0)
-    return DETOUR_FACTOR * straight
+    start a cil jsou body - jinak odhad systematicky nadhodnocuje. Kazdy dalsi
+    waypoint pridava WAYPOINT_OVERHEAD_M."""
+    points = _estimate_points(start, end, seq)
+    return (sum(_estimate_gap_m(a, b) for a, b in zip(points, points[1:]))
+            + WAYPOINT_OVERHEAD_M * max(len(seq) - 1, 0))
 
 
 def _reachable(lat, lon, start, end, max_m):
@@ -297,15 +349,28 @@ def _reachable(lat, lon, start, end, max_m):
     return detour <= max_m * 0.9
 
 
-def _within_reach(candidates, start, end, max_m):
+def _within_reach(candidates, start, end, max_m, context=None):
+    """Kandidati v dosahu, serazeni podle HODNOTY PRO HLEDANI (`value`).
+
+    Hodnota = skore dlazdice + strategicky postup k pristimu square, ktery by
+    dlazdice sama prinesla. Skore postup nezna: dlazdice chybejici ve square
+    okne ma skore jako kazda jina letos nenavstivena (~33), pritom jeji
+    doplneni ma cenu stovek bodu (rucni trasa Stodulky -> Barrandov: 1 z 5
+    dlazdic rocniho okna 12x12 = postup 235). Bez toho ji hledani nemelo proc
+    zkusit - a strop MAX_CANDIDATES se proto uplatnuje az po serazeni."""
+    from scoring import square_progress
+
     within = []
     for cand in candidates:
-        lat, lon = tile_center(cand["tile"])
-        if _reachable(lat, lon, start, end, max_m):
-            within.append({"tile": tuple(cand["tile"]), "score": cand["score"], "lat": lat, "lon": lon})
-        if len(within) >= MAX_CANDIDATES:
-            break
-    return within
+        tile = tuple(cand["tile"])
+        lat, lon = tile_center(tile)
+        if not _reachable(lat, lon, start, end, max_m):
+            continue
+        progress = square_progress({tile}, context) if context else 0.0
+        within.append({"tile": tile, "score": cand["score"], "value": cand["score"] + progress,
+                       "lat": lat, "lon": lon})
+    within.sort(key=lambda item: -item["value"])
+    return within[:MAX_CANDIDATES]
 
 
 def candidate_groups(within):
@@ -327,6 +392,27 @@ def candidate_groups(within):
                     stack.append(neighbour)
         groups.append([by_tile[tile] for tile in component])
     return groups
+
+
+def _region_seeds(within, start, end, limit_m):
+    """Nejcennejsi kandidat z kazde oblasti REGION_TILES x REGION_TILES - kazda
+    oblast je jiny smer behu. Posloupnost se od nej pak doplni (_ratio_fill)
+    tim, co je po ruce.
+
+    Jen z kandidatu, na ktere samotna zajizdka nepretahne limit_m: nejcennejsi
+    dlazdice oblasti byva ta nejvzdalenejsi (na jihu (8846, 5557), 332 bodu) a
+    trasa k ni presahla okno, takze z ni po oprave zbyla prima cesta bez
+    prinosu - zatimco o dlazdici vedle se stejnou hodnotou postupu (268) vedla
+    rucni trasa uzivatele."""
+    best = {}
+    for cand in within:
+        if _estimate_path_m(start, end, [cand]) > limit_m:
+            continue
+        cell = (cand["tile"][0] // REGION_TILES, cand["tile"][1] // REGION_TILES)
+        if cell not in best or cand["value"] > best[cell]["value"]:
+            best[cell] = cand
+    ranked = sorted(best.values(), key=lambda cand: -cand["value"])
+    return [[cand] for cand in ranked[:MAX_REGION_SEEDS]]
 
 
 def _square_completion_seeds(within, context, start, end, max_m):
@@ -363,48 +449,100 @@ def _square_completion_seeds(within, context, start, end, max_m):
                 continue
             seen.add(key)
 
+            # Chybejici tiles maji cenu jen SPOLECNE - kazdy nese svuj podil
+            # hodnoty okna, jinak by je oprava pretecene trasy zahodila jako
+            # prvni (samostatne maji skore nizke nebo zadne).
+            value = weight * (2 * side - 1)
+            share = value / len(missing)
             waypoints = []
             for tile in missing:
                 if tile in by_tile:
-                    waypoints.append(by_tile[tile])
+                    cand = by_tile[tile]
+                    waypoints.append({**cand, "value": max(cand["value"], share)})
                     continue
                 lat, lon = tile_center(tile)
                 if not _reachable(lat, lon, start, end, max_m):
                     waypoints = None
                     break
-                waypoints.append({"tile": tile, "score": 0.0, "lat": lat, "lon": lon})
+                waypoints.append({"tile": tile, "score": 0.0, "value": share, "lat": lat, "lon": lon})
             if waypoints:
-                seeds.append((weight * (2 * side - 1), len(missing), waypoints))
+                seeds.append((value, len(missing), waypoints))
 
     seeds.sort(key=lambda item: (-item[0], item[1]))
     return [waypoints for _, _, waypoints in seeds[:MAX_SQUARE_SEEDS]]
 
 
-def _greedy_fill(start, end, sequence, pool, limit_m):
-    """Cheapest insertion na odhadech: doplnuje kandidaty z poolu, dokud se
-    odhad delky vejde pod limit_m.
+def _ratio_fill(start, end, sequence, pool, budget_m):
+    """Doplnuje kandidaty podle hodnoty na pridany kilometr (odhad), dokud se
+    odhad delky vejde do budget_m. Kazdy se vklada na nejlevnejsi misto.
 
-    limit_m je uroven naplnenosti, ne horni hranice tolerance. Portfolio se
-    stavi na DVOU urovnich (cilova delka a horni hranice okna) - kdyz se plnilo
-    jen po max_m, zadny kandidat blizko cile nevznikl a cilova funkce mohla
-    vybirat jen mezi dlouhymi trasami."""
+    Pomer misto poradi skore: posloupnost pak roste tam, kde uz vede, a
+    nemicha smery. Pridana delka se pocita aspon MIN_INSERT_M - dlazdice, kterou
+    trasa protne skoro zadarmo, jinak ma nekonecny pomer bez ohledu na hodnotu."""
     sequence = list(sequence)
+    points = _estimate_points(start, end, sequence)
+    length = _estimate_path_m(start, end, sequence)
     used = {item["tile"] for item in sequence}
-    for cand in pool:
+
+    while len(sequence) < MAX_WAYPOINTS:
+        overhead = WAYPOINT_OVERHEAD_M if sequence else 0.0
+        best = None
+        for cand in pool:
+            if cand["tile"] in used or cand["value"] <= 0:
+                continue
+            point = _estimate_point(cand)
+            for position in range(len(points) - 1):
+                before, after = points[position], points[position + 1]
+                added = (_estimate_gap_m(before, point) + _estimate_gap_m(point, after)
+                         - _estimate_gap_m(before, after) + overhead)
+                if length + added > budget_m:
+                    continue
+                ratio = cand["value"] / max(added, MIN_INSERT_M)
+                if best is None or ratio > best[0]:
+                    best = (ratio, position, added, cand, point)
+        if best is None:
+            break
+        _ratio, position, added, cand, point = best
+        sequence.insert(position, cand)
+        points.insert(position + 1, point)
+        used.add(cand["tile"])
+        length += added
+    return sequence
+
+
+def _rank_fill(start, end, pool, budget_m):
+    """Doplnuje kandidaty v poradi HODNOTY (kazdy na nejlevnejsi misto), dokud se
+    odhad vejde do budget_m. Doplnek k _ratio_fill: ten dava prednost kompaktnim
+    skupinam blizkych dlazdic, tenhle jde i za vzdalenejsi cennou dlazdici.
+    Jedna posloupnost navic v portfoliu - mereno: okruh 12 km ze Stodulek
+    skore 247 -> 270, okruh 10 km z Karlova nam. 1,4 -> 1,5."""
+    sequence = []
+    for cand in sorted(pool, key=lambda item: -item["value"]):
         if len(sequence) >= MAX_WAYPOINTS:
             break
-        if cand["tile"] in used:
+        if cand["value"] <= 0:
             continue
-        best = None
-        for pos in range(len(sequence) + 1):
-            trial = sequence[:pos] + [cand] + sequence[pos:]
-            estimate = _estimate_path_m(start, end, trial)
-            if estimate <= limit_m and (best is None or estimate < best[0]):
-                best = (estimate, trial)
-        if best:
-            sequence = best[1]
-            used.add(cand["tile"])
+        trial = _ratio_fill(start, end, sequence, [cand], budget_m)
+        if len(trial) > len(sequence):
+            sequence = trial
     return sequence
+
+
+def _drop_order(start, end, sequence):
+    """Waypointy od nejmene cennych: hodnota na kilometr, ktery vypusteni usetri.
+
+    Drive se vypoustel waypoint s nejnizsim skore dlazdice. Skore ale nerika,
+    kolik ktera dlazdice stoji delky - a pri shode (102,38 vs 102,39) rozhodl
+    bonus za stari: na trase Stodulky -> Barrandov tak vypadla cela jizni skupina
+    (sama o sobe 606 bodu) a zustal sever (292)."""
+    total = _estimate_path_m(start, end, sequence)
+
+    def cost(item):
+        rest = [other for other in sequence if other is not item]
+        saved = total - _estimate_path_m(start, end, rest)
+        return item["value"] / max(saved, MIN_INSERT_M)
+
+    return sorted(sequence, key=cost)
 
 
 def _filler_candidates(start, end, max_m, used_tiles):
@@ -420,8 +558,73 @@ def _filler_candidates(start, end, max_m, used_tiles):
                 continue
             lat, lon = tile_center(tile)
             if _reachable(lat, lon, start, end, max_m):
-                fillers.append({"tile": tile, "score": 0.0, "lat": lat, "lon": lon})
+                fillers.append({"tile": tile, "score": 0.0, "value": 0.0, "lat": lat, "lon": lon})
     return fillers
+
+
+def _best_additions(start, end, sequence, pool, limit_m):
+    """Posloupnosti o jeden waypoint delsi, od nejlepsiho pomeru hodnota /
+    pridany kilometr (odhad)."""
+    if len(sequence) >= MAX_WAYPOINTS:
+        return []
+    used = {item["tile"] for item in sequence}
+    current = _estimate_path_m(start, end, sequence)
+    scored = []
+    for cand in pool:
+        if cand["tile"] in used or cand["value"] <= 0:
+            continue
+        trial = _ratio_fill(start, end, sequence, [cand], limit_m)
+        if len(trial) > len(sequence):
+            added = _estimate_path_m(start, end, trial) - current
+            scored.append((cand["value"] / max(added, MIN_INSERT_M), trial))
+    scored.sort(key=lambda item: -item[0])
+    return [trial for _ratio, trial in scored[:LOCAL_SEARCH_MOVES]]
+
+
+def _neighbours(start, end, sequence, pool, limit_m, is_loop):
+    """Sousedni posloupnosti pro lokalni hledani, nejslibnejsi tahy napred
+    a druhy tahu prostridane, aby strop prepoctu nevycerpal jediny druh."""
+    moves = []
+    if is_loop and len(sequence) > 1:
+        moves.append([list(reversed(sequence))])
+    if len(sequence) > 1:
+        order = _drop_order(start, end, sequence)
+        moves.append([[item for item in sequence if item is not dropped]
+                      for dropped in order[:LOCAL_SEARCH_MOVES]])
+        weakest = order[0]
+        rest = [item for item in sequence if item is not weakest]
+        others = [cand for cand in pool if cand["tile"] != weakest["tile"]]
+        moves.append(_best_additions(start, end, rest, others, limit_m))
+    moves.append(_best_additions(start, end, sequence, pool, limit_m))
+
+    trials = []
+    for rank in range(max((len(kind) for kind in moves), default=0)):
+        trials.extend(kind[rank] for kind in moves if rank < len(kind))
+    return trials
+
+
+def _local_search(details_for, key, best, pool, start, end, limit_m, is_loop):
+    """Zlepsuje vitezze tahy _neighbours - prvni zlepseni se prijme a hleda
+    se dal od nej, dokud nejaky tah pomaha a nevycerpa se LOCAL_SEARCH_EVALS."""
+    tried = {tuple(item["tile"] for item in best["sequence"])}
+    evaluations = 0
+    improved = True
+    while improved and evaluations < LOCAL_SEARCH_EVALS:
+        improved = False
+        for trial in _neighbours(start, end, best["sequence"], pool, limit_m, is_loop):
+            signature = tuple(item["tile"] for item in trial)
+            if signature in tried:
+                continue
+            if evaluations >= LOCAL_SEARCH_EVALS:
+                break
+            tried.add(signature)
+            evaluations += 1
+            details = details_for(trial)
+            if details and key(details) > key(best):
+                best = details
+                improved = True
+                break
+    return best
 
 
 def _extend_to_window(details_for, start, end, best, min_m, max_m):
@@ -460,7 +663,7 @@ def _extend_to_window(details_for, start, end, best, min_m, max_m):
     return current
 
 
-def _shrink_toward_target(details_for, key, best, target_m):
+def _shrink_toward_target(details_for, key, best, target_m, start, end):
     """Zkrati trasu k cilove delce vypustenim waypointu - dokud se skore zlepsuje.
 
     Zrcadlovy protejsek `_extend_to_window`. Pracuje se SKUTECNOU delkou, ne s
@@ -468,8 +671,9 @@ def _shrink_toward_target(details_for, key, best, target_m):
     sekvence naplnena "jen po cil" vyjde po exaktnim prepoctu nad cilem. Delku
     proto nejde uridit pri stavbe sekvence, jen zpetnou vazbou z prepoctu.
 
-    Zkousi se vypustit nekolik nejslabsich waypointu a vezme se ten nejlepsi
-    vysledek - vypustit ten s nejnizsim skore nestaci, protoze delku trasy
+    Zkousi se vypustit nekolik nejmene cennych waypointu (_drop_order: hodnota
+    na usetreny kilometr podle odhadu) a vezme se nejlepsi exaktni vysledek -
+    spolehnout se na jediny kandidat nestaci, protoze delku trasy
     urcuje poloha dlazdic, ne jejich pocet (mereno: vypusteni nejslabsiho
     waypointu trasu o 90 m PRODLOUZILO). Jestli se zkraceni vyplati, rozhoduje
     cilova funkce: kratsi trasa ma mensi prinos, ale i mensi odchylku delky.
@@ -480,7 +684,7 @@ def _shrink_toward_target(details_for, key, best, target_m):
         if len(sequence) <= 1 or current["length_m"] <= target_m:
             break
 
-        weakest = sorted(sequence, key=lambda item: item["score"])[:SHRINK_CANDIDATES]
+        weakest = _drop_order(start, end, sequence)[:SHRINK_CANDIDATES]
         trials = []
         for dropped in weakest:
             details = details_for([item for item in sequence if item is not dropped])
@@ -499,7 +703,8 @@ def _shrink_toward_target(details_for, key, best, target_m):
 def _route_details(graph, leg_cache, index, start_node, sequence, min_m, max_m, context,
                    end_node=None, avoid_reuse=False, quiet_factor=1.0, trail_factor=1.0):
     """Exaktni trasa pro sekvenci waypointu + spolecny prinos protnutych tiles.
-    Pri prekroceni max_m odpada nejslabsi waypoint. avoid_reuse penalizuje
+    Pri prekroceni max_m odpada waypoint s nejmensi hodnotou na usetreny
+    kilometr (_drop_order). avoid_reuse penalizuje
     opakovany pruchod stejnou ulici, quiet_factor cesty podel vyznamnych ulic
     a trail_factor zvyhodnuje znacene trasy."""
     from scoring import evaluate_tile_set, square_progress
@@ -538,7 +743,7 @@ def _route_details(graph, leg_cache, index, start_node, sequence, min_m, max_m, 
         length_m = path_length_m(graph, node_path)
         if length_m <= max_m or not sequence:
             break
-        weakest = min(sequence, key=lambda item: item["score"])
+        weakest = _drop_order(start_point, finish, sequence)[0]
         sequence = [item for item in sequence if item is not weakest]
 
     coordinates = path_coordinates(graph, node_path)
@@ -615,11 +820,12 @@ def plan_tile_loop(graph, start_lat, start_lon, target_km, tolerance_km, candida
     """Beh v delce target +- tolerance s nejvetsim spolecnym prinosem.
 
     Okruh (end == start, vychozi), nebo z bodu do bodu (end_lat/end_lon).
-    Porovnava varianty: rank-greedy seed + seedy kolem skupin sousednich kandidatu
-    + seedy na dokompletovani square, kazdou exaktne prepocita a ohodnoti
+    Porovnava varianty: posloupnosti z ruznych oblasti (_region_seeds) a seedy
+    na dokompletovani square, plnene podle hodnoty na kilometr k cilove delce
+    (_ratio_fill + kalibrace odhadu), kazdou exaktne prepocita a ohodnoti
     spolecnym prinosem VSECH protnutych tiles (evaluate_tile_set - zisky mnoziny,
     ne soucet skore) snizenym o merky kvality (_variant_score). Vitez se jeste
-    zkousi vylepsit pridavanim kandidatu.
+    doladi lokalnim hledanim (_local_search: pridat, vypustit, vymenit, obratit).
 
     quiet_weight 0..1 = jak silne se pocita podil delky podel vyznamnych ulic;
     0 znamena "jen sbirej dlazdice", 1 "co nejvic klidu".
@@ -635,7 +841,7 @@ def plan_tile_loop(graph, start_lat, start_lon, target_km, tolerance_km, candida
     end = (end_lat, end_lon) if end_lat is not None else start
     is_loop = end == start
 
-    within = _within_reach(candidates, start, end, max_m)
+    within = _within_reach(candidates, start, end, max_m, context)
     index = node_index(graph)
     start_node = nearest_node(index, start_lat, start_lon)
     end_node = None if is_loop else nearest_node(index, end[0], end[1])
@@ -654,14 +860,6 @@ def plan_tile_loop(graph, start_lat, start_lon, target_km, tolerance_km, candida
                 _variant_score(details, target_m, tolerance_m, quiet_weight),
                 -details["length_m"])
 
-    # Vyber skupin podle souctu skore je jen levny proxy pro poradi seedu;
-    # rozhoduje az spolecny prinos exaktnich variant.
-    groups = sorted(
-        candidate_groups(within),
-        key=lambda group: sum(member["score"] for member in group),
-        reverse=True,
-    )[:MAX_GROUP_SEEDS]
-
     variants = []
     seen_sequences = set()
 
@@ -677,25 +875,93 @@ def plan_tile_loop(graph, start_lat, start_lon, target_km, tolerance_km, candida
             variants.append(details)
         return details
 
-    add_variant(_greedy_fill(start, end, [], within, max_m))
+    # Pomer skutecne/odhadnute delky z exaktnich prepoctu TETO ulohy (viz
+    # INITIAL_CALIBRATION). Median, aby jedna podivna varianta neujela.
+    ratios = []
 
-    for group in groups:
-        seed = _greedy_fill(start, end, [], sorted(group, key=lambda m: -m["score"]), max_m)
-        if not seed:
-            continue
-        add_variant(_greedy_fill(start, end, seed, within, max_m))
+    def calibration():
+        if not ratios:
+            return INITIAL_CALIBRATION
+        return sorted(ratios)[len(ratios) // 2]
 
+    def observe(details):
+        estimate = _estimate_path_m(start, end, details["sequence"])
+        if not details["sequence"] or estimate <= 0:
+            return None
+        low, high = CALIBRATION_BOUNDS
+        ratios.append(min(max(details["length_m"] / estimate, low), high))
+        return ratios[-1]
+
+    def build(seed):
+        """Posloupnost ze seedu naplnena k CILOVE delce. Kdyz exaktni delka
+        vyjde od cile daleko, postavi se jeste jednou s pomerem zmerenym prave
+        na ni - teren (a tim chyba odhadu) se lisi smer od smeru."""
+        details = add_variant(_ratio_fill(start, end, seed, within, target_m / calibration()))
+        if not details:
+            return
+        own = observe(details)
+        if own and abs(details["length_m"] - target_m) > tolerance_m / 3:
+            refill = add_variant(_ratio_fill(start, end, seed, within, target_m / own))
+            if refill:
+                observe(refill)
+
+    build([])
+    ranked = add_variant(_rank_fill(start, end, within, target_m / calibration()))
+    if ranked:
+        observe(ranked)
+    for seed in _region_seeds(within, start, end, target_m / calibration()):
+        build(seed)
     for square_seed in _square_completion_seeds(within, context, start, end, max_m):
-        seed = _greedy_fill(start, end, [], sorted(square_seed, key=lambda m: -m["score"]), max_m)
+        # Okno ma smysl jen cele - vsechny chybejici tiles napred, pak doplnit.
+        seed = _ratio_fill(start, end, [], square_seed, math.inf)
         if len(seed) < len(square_seed):
             continue
-        add_variant(_greedy_fill(start, end, seed, within, max_m))
+        if _estimate_path_m(start, end, seed) * calibration() > max_m:
+            continue
+        build(seed)
+
+    if not variants:
+        raise RuntimeError("No walkable route found from the start point")
+
+    # Hledani (lokalni hledani, prodlouzeni, zkraceni, vyber posloupnosti pro
+    # nizkoopakovaci a klidne prepocty) bezi s PEVNYMI vahami klidu
+    # (SEARCH_QUIET_WEIGHTS); vse, co najde, jde do portfolia a posuvnik az na
+    # konci vybira.
+    def perspective_key(weight):
+        def key(details):
+            return (details["in_window"],
+                    _variant_score(details, target_m, tolerance_m, weight),
+                    -details["length_m"])
+        return key
+
+    search_key = perspective_key(SEARCH_QUIET_WEIGHTS[0])
+
+    def keep(details):
+        if all(other is not details for other in variants):
+            variants.append(details)
+        return details
+
+    perspective_best = []
+    for weight in SEARCH_QUIET_WEIGHTS:
+        key = perspective_key(weight)
+        best = keep(_local_search(details_for, key, max(variants, key=key), within,
+                                  start, end, max_m / calibration(), is_loop))
+
+        # Kratsi trasa nez zadane okno: dotahni delku pres dalsi tiles v dosahu.
+        if not best["in_window"] and best["length_m"] < min_m:
+            best = keep(_extend_to_window(details_for, start, end, best, min_m, max_m))
+
+        # Delsi nez cil: zkus ji zkratit k cilove delce. Rozhodne cilova funkce -
+        # kratsi trasa ma mensi prinos, ale i mensi odchylku delky.
+        if best["length_m"] > target_m:
+            best = keep(_shrink_toward_target(details_for, key, best, target_m, start, end))
+        perspective_best.append(best)
 
     # Nizkoopakovaci varianty patri do portfolia, ne az do finalizace vitezze:
-    # nejlepsi seedy se prepocitaji i s vyhybanim opakovanym ulicim a souteri
-    # rovnocenne. (Jinak vyhraje trasa, ktera prinos nasbirala prave opakovanim,
-    # a jeji "opravena" verze uz se neprosadi.)
-    for details in sorted(variants, key=variant_key, reverse=True)[:AVOID_VARIANTS]:
+    # nejlepsi posloupnosti se prepocitaji i s vyhybanim opakovanym ulicim a
+    # souteri rovnocenne. (Jinak vyhraje trasa, ktera prinos nasbirala prave
+    # opakovanim, a jeji "opravena" verze uz se neprosadi.)
+    for details in sorted(variants, key=search_key, reverse=True)[:AVOID_VARIANTS]:
         # Vyhybani je drahe (hledani bez cache) - ma smysl jen tam, kde je co
         # zlepsovat; varianty s minimalnim opakovanim se preskakuji.
         if details["repeated_m"] <= AVOID_MIN_RATIO * details["length_m"]:
@@ -706,53 +972,25 @@ def plan_tile_loop(graph, start_lat, start_lon, target_km, tolerance_km, candida
     # s prirazkou cestam podel vyznamnych ulic. Az takova varianta ukaze, kolik
     # klid opravdu stoji - odhadnout to z jedne trasy nejde. Pocitaji se i pri
     # nulove vaze, aby portfolio na posuvniku nezaviselo (viz QUIET_LEG_PROFILES).
-    for details in sorted(variants, key=variant_key, reverse=True)[:QUIET_VARIANTS]:
+    # Zdroje klidnych prepoctu z RUZNYCH smeru (_distinct_variants), ne prvnich
+    # nekolik podle skore - ty vedou vetsinou tymz mistem a jejich klidne
+    # prepocty jsou si podobne, takze posuvnik nemel z ceho vybirat.
+    quiet_sources = _distinct_variants(variants, search_key, limit=QUIET_VARIANTS)
+    quiet_sources += [details for details in perspective_best
+                      if all(details is not other for other in quiet_sources)]
+    for details in quiet_sources:
         for quiet_factor, trail_factor in QUIET_LEG_PROFILES:
-            add_variant(details["sequence"], avoid_reuse=True,
-                        quiet_factor=quiet_factor, trail_factor=trail_factor)
-
-    if not variants:
-        raise RuntimeError("No walkable route found from the start point")
+            profile = {"avoid_reuse": True, "quiet_factor": quiet_factor, "trail_factor": trail_factor}
+            quiet = add_variant(details["sequence"], **profile)
+            # Klidna cesta je delsi. Posloupnost naplnena k cili pak cil
+            # prestreli a delkova penalizace klidnou variantu vyradi - posuvnik
+            # by nemel z ceho vybirat. Proto i verze o waypoint kratsi.
+            if (quiet and len(quiet["sequence"]) > 1
+                    and quiet["length_m"] > target_m + tolerance_m / 3):
+                dropped = _drop_order(start, end, quiet["sequence"])[0]
+                add_variant([item for item in quiet["sequence"] if item is not dropped], **profile)
 
     best = max(variants, key=variant_key)
-
-    for _ in range(IMPROVE_ROUNDS):
-        used = {item["tile"] for item in best["sequence"]}
-        pool = [cand for cand in within if cand["tile"] not in used][:IMPROVE_MOVES_PER_ROUND]
-        improved = False
-        for cand in pool:
-            if len(best["sequence"]) >= MAX_WAYPOINTS:
-                break
-            trial = _greedy_fill(start, end, best["sequence"], [cand], max_m)
-            if len(trial) == len(best["sequence"]):
-                continue
-            details = details_for(trial)
-            if details and variant_key(details) > variant_key(best):
-                best = details
-                improved = True
-        if not improved:
-            break
-
-    # Kratsi trasa nez zadane okno: dotahni delku pres dalsi tiles v dosahu.
-    if not best["in_window"] and best["length_m"] < min_m:
-        best = _extend_to_window(details_for, start, end, best, min_m, max_m)
-
-    # Delsi nez cil: zkus ji zkratit k cilove delce. Rozhodne cilova funkce -
-    # kratsi trasa ma mensi prinos, ale i mensi odchylku delky.
-    if best["length_m"] > target_m:
-        best = _shrink_toward_target(details_for, variant_key, best, target_m)
-
-    # Finalni prepocet vitezne trasy s vyhybanim - pokryva vitezze, ktery vzesel
-    # az z kola vylepsovani (varianty z portfolia uz svou avoid verzi maji).
-    if best["sequence"] and best["repeated_m"] > 0:
-        refined = details_for(best["sequence"], avoid_reuse=True)
-        if refined and variant_key(refined) > variant_key(best):
-            best = refined
-
-    # Vitez patri do vyberu, i kdyz vzesel az z kol vylepsovani (ta do portfolia
-    # nepridavaji).
-    if all(details is not best for details in variants):
-        variants.append(best)
 
     # Dlazdice, kvuli kterym se beh dela: ty, na ktere trasa mirila (waypointy),
     # plus vsechny doporucene, ktere cestou protne. Itinerar podle nich rekne,

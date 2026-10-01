@@ -109,6 +109,34 @@ for (const [name, zIndex] of Object.entries(PANES)) {
 
 const OPPORTUNITY_COLOR = '#4a3aa7';
 
+// Letosni dlazdice se barvi podle stari posledni navstevy - te slozky ceny,
+// podle ktere planovac vybira okruhy z domova. Jeden odstin, tmavsi = cerstvejsi
+// (navazuje na drivejsi "cervena = nedavno"). Mapa je pod dlazdicemi videt, takze
+// se s barvou stupnuje i kryti: pri stejnem kryti 0,32 vysel rozdil sousednich
+// stupnu po smichani s podkladem jen dE 4,4 (cil >= 8), s odstupnovanym 11,2
+// (pri barvoslepsti 10,6). Nejstarsi letosni stupen ma kryti jako dosud.
+// Rampa overena validatorem (ordinal: monotonni svetlost, krok >= 0,06, svetly
+// konec 2,21:1 proti povrchu, jeden odstin).
+const RECENCY_STEPS = [
+  { color: '#8e2e00', fillOpacity: 0.6, label: days => `do ${days} dni`, price: 'cena 0' },
+  { color: '#d74b01', fillOpacity: 0.45, label: () => '1-3 mesice', price: 'cena 0-0,31' },
+  { color: '#ff8d65', fillOpacity: 0.32, label: () => 'starsi letos', price: 'cena 0,31+' }
+];
+const RECENCY_MID_DAYS = 90;
+const OLD_TILE_FILL_OPACITY = 0.32;
+let stalenessFreshDays = 30;  // prepise /api/summary (scoring.STALENESS_FRESH_DAYS)
+
+function recencyStep(props) {
+  if (props.staleness <= 0) return RECENCY_STEPS[0];
+  if (props.days_since_visit <= RECENCY_MID_DAYS) return RECENCY_STEPS[1];
+  return RECENCY_STEPS[2];
+}
+
+function hexWithAlpha(hex, alpha) {
+  const [r, g, b] = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16));
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 const periodOrder = ['all', 'year'];
 const overlayGroups = {
   metro: L.layerGroup().addTo(map),
@@ -142,7 +170,10 @@ function opportunityPopup(p) {
 function tilePopup(p) {
   const visits = p.visit_count ? `<br>Visits: ${p.visit_count}` : '';
   const dates = p.first_visit ? `<br>${p.first_visit} - ${p.last_visit}` : '';
-  return `Tile ${p.x}, ${p.y}${visits}${dates}`;
+  const age = p.days_since_visit !== undefined
+    ? `<br>Naposledy pred ${p.days_since_visit} dny, cena za stari ${p.staleness}`
+    : '';
+  return `Tile ${p.x}, ${p.y}${visits}${dates}${age}`;
 }
 
 function opportunityStyle(feature) {
@@ -185,13 +216,23 @@ async function loadTilesLayer() {
     pane: 'tilesPane',
     style: feature => {
       const key = tileClass[`${feature.properties.x}:${feature.properties.y}`];
+      if (key === 'year') {
+        const step = recencyStep(feature.properties);
+        return {
+          color: step.color,
+          weight: 0.5,
+          opacity: 0.45,
+          fillColor: step.color,
+          fillOpacity: step.fillOpacity
+        };
+      }
       const period = periods.find(item => item.key === key);
       return {
         color: period.color,
         weight: 0.5,
         opacity: 0.45,
         fillColor: period.color,
-        fillOpacity: 0.32
+        fillOpacity: OLD_TILE_FILL_OPACITY
       };
     },
     onEachFeature: (feature, layer) => layer.bindPopup(tilePopup(feature.properties))
@@ -386,9 +427,22 @@ function renderStats() {
   `).join('');
 }
 
+function legendSwatch(color, fillOpacity) {
+  // vzorek jak v mape: poloprusvitna vypln s plnym obrysem
+  return `<span class="swatch" style="background:${hexWithAlpha(color, fillOpacity)};`
+    + `border:1px solid ${color}"></span>`;
+}
+
 function renderLegend() {
+  const old = periods.find(period => period.key === 'all');
+  const recency = [...RECENCY_STEPS].reverse().map(step =>
+    `<div>${legendSwatch(step.color, step.fillOpacity)} ${step.label(stalenessFreshDays)}`
+    + ` <span class="label">(${step.price})</span></div>`
+  ).join('');
   document.querySelector('#legend').innerHTML = `
-    <div>Barva tile = obdobi posledni navstevy</div>
+    <div>Barva tile = kdy naposledy navstiveno</div>
+    <div>${legendSwatch(old.color, OLD_TILE_FILL_OPACITY)} pred letoskem</div>
+    ${recency}
     <div><span class="swatch" style="background:${OPPORTUNITY_COLOR}"></span> Doporuceni: nikdy nenavstiveno</div>
   `;
 }
@@ -427,6 +481,7 @@ async function fitToHomeArea(summary) {
 async function loadSummary() {
   const summary = await fetch('/api/summary').then(r => r.json());
   periods = periodOrder.map(key => summary.periods.find(period => period.key === key));
+  if (summary.staleness_fresh_days !== undefined) stalenessFreshDays = summary.staleness_fresh_days;
 
   renderStats();
   renderLegend();
