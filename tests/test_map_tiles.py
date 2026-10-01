@@ -30,3 +30,16 @@ def test_freshly_run_tile_is_worth_nothing_on_the_map_too():
     props = _tile_props(Tile(1, 1), record(datetime(day.year, day.month, day.day)), today=TODAY)
     assert props["days_since_visit"] == STALENESS_FRESH_DAYS
     assert props["staleness"] == 0.0
+
+
+def test_legend_scale_comes_from_the_planners_price():
+    """Barva letosni dlazdice = cena / cena po roce; meritko i znacky legendy
+    musi sedet na tutez funkci, jinak by barva a legenda ukazovaly jinou cenu."""
+    from api import _staleness_scale
+
+    scale = _staleness_scale()
+    assert scale["fresh_days"] == STALENESS_FRESH_DAYS
+    assert scale["year"] == round(_staleness_bonus(365), 3)
+    assert scale["ticks"][0] == {"days": STALENESS_FRESH_DAYS, "staleness": 0.0}
+    prices = [tick["staleness"] for tick in scale["ticks"]]
+    assert prices == sorted(prices) and prices[-1] == scale["year"]

@@ -23,7 +23,7 @@ from square import find_largest_square
 from statshunters import resolve_share_link, sync_activities
 from tiles import build_tile_database
 from transit import TransitNetwork, load_transit_graph, metro_geometry
-from waygraph import load_walk_graph
+from waygraph import GraphUnavailable, load_walk_graph
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,9 +95,9 @@ def period_definitions(today=None):
             "label": f"Rok {today.year}",
             "start_date": date(today.year, 1, 1),
             "end_date": today,
-            # prostredni stupen oranzove skaly, kterou mapa barvi letosni
-            # dlazdice podle stari (web/app.js, RECENCY_STEPS)
-            "color": "#d74b01",
+            # stred oranzove skaly, kterou mapa barvi letosni dlazdice podle
+            # stari (web/app.js, RECENCY_STOPS)
+            "color": "#c94500",
         },
     }
 
@@ -118,6 +118,21 @@ def get_period_tile_database(period_key):
 
 def _visited_tiles(period_key="all"):
     return list(get_period_tile_database(period_key).keys())
+
+
+# Stari, pro ktera legenda mapy ukazuje znacku (dny od posledni navstevy).
+STALENESS_LEGEND_DAYS = (STALENESS_FRESH_DAYS, 91, 182, 365)
+
+
+def _staleness_scale():
+    """Meritko barveni letosnich dlazdic: cena (bonus za stari) od 0 po cenu
+    po roce. Ze scoringu, aby mapa a planovac nemohly pocitat kazdy jinak."""
+    return {
+        "fresh_days": STALENESS_FRESH_DAYS,
+        "year": round(_staleness_bonus(365), 3),
+        "ticks": [{"days": days, "staleness": round(_staleness_bonus(days), 3)}
+                  for days in STALENESS_LEGEND_DAYS],
+    }
 
 
 def _tile_props(tile, rec, today=None):
@@ -194,7 +209,7 @@ def summary():
         "expedition_budget_min": config.get("expedition_budget_min", 120),
         "run_pace_min_per_km": config.get("run_pace_min_per_km", 6.0),
         "quiet_weight": config.get("quiet_weight", 0.6),
-        "staleness_fresh_days": STALENESS_FRESH_DAYS,
+        "staleness_scale": _staleness_scale(),
         "periods": periods,
     }
 
@@ -350,7 +365,11 @@ def plan_route(request: RouteRequest):
         raise HTTPException(status_code=400, detail="Tolerance musi byt 0.2 km az polovina delky")
 
     reach_km = (distance_km + tolerance_km) / 2 + 0.5
-    graph = load_walk_graph(lat, lon, reach_km)
+    try:
+        graph = load_walk_graph(lat, lon, reach_km)
+    except GraphUnavailable as exc:
+        # nova oblast a Overpass nedostupny - zkusit pozdeji, ne "chyba serveru"
+        raise HTTPException(status_code=503, detail=str(exc))
 
     opportunities = get_opportunities()
     try:

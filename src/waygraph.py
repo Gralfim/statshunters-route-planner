@@ -15,6 +15,7 @@ import math
 import pickle
 from pathlib import Path
 
+import overpass
 from geo import bearing, haversine_m, tag
 from runcost import NAMEABLE_HIGHWAYS, cost_parameters, prepare_run_costs
 
@@ -62,6 +63,11 @@ WALK_FILTERS = [
 # Predpona souboru grafu = verze obsahu. Cache je podle pokryti, takze graf
 # stazeny se starym filtrem by se jinak tise pouzival dal. walk_ = bez cyklostezek.
 GRAPH_PREFIX = "walk2"
+
+
+class GraphUnavailable(RuntimeError):
+    """Pesi graf nove oblasti se nepodarilo stahnout (vypadek Overpassu).
+    RuntimeError, aby vyprava cil jen preskocila misto padu celeho pozadavku."""
 
 
 def graph_path(lat, lon, reach_km):
@@ -137,7 +143,16 @@ def enrich_streets(graph, lat, lon, reach_km):
     zdroje. Bezi jednou per graf (graf se drzi v pameti)."""
     import landmarks
 
-    segments = landmarks.street_segments(landmarks.load_streets(lat, lon, reach_km))
+    graph.graph["sources_complete"] = True
+    streets = landmarks.load_streets(lat, lon, reach_km)
+    if streets is None:
+        # Ulice vypadly: chodniky nemaji jmeno ani priznak "podel rusne ulice",
+        # takze se meni i ceny hran (klidne trasy) a itinerar. Drive se takovy
+        # graf ulozil do cache jako hotovy - za neuplny se povazoval jen pri
+        # vypadku znacenych tras - a degradace zustala natrvalo.
+        graph.graph["sources_complete"] = False
+        streets = []
+    segments = landmarks.street_segments(streets)
     graph.graph["street_segments"] = segments
 
     unnamed, unnamed_mids, unnamed_owns = [], [], []
@@ -166,11 +181,11 @@ def enrich_streets(graph, lat, lon, reach_km):
                     extra=(segments[4], "along_major"))
 
     trails = landmarks.load_trails(lat, lon, reach_km)
-    if not trails:
-        # zadne znacene trasy = bud jich tu neni, nebo zdroj vypadl; graf se pak
-        # necachuje (viz _prepare), aby se degradace nezafixovala
+    if trails is None:
+        # zdroj vypadl; graf se pak necachuje (viz _prepare), aby se degradace
+        # nezafixovala ("v okoli nic neni" je prazdny seznam a je platny)
         graph.graph["sources_complete"] = False
-    else:
+    elif trails:
         _match_parallel(graph, walkable, walkable_mids, walkable_owns,
                         landmarks.line_segments(trails), TRAIL_MATCH_MAX_M, "trail",
                         candidates=20)
@@ -193,6 +208,7 @@ def _prepare(graph, lat, lon, reach_km):
         complete = False
     if not graph.graph.get("sources_complete", True):
         complete = False
+    graph.graph["sources_complete"] = complete
     prepare_run_costs(graph)
     return graph, complete
 
@@ -252,24 +268,43 @@ def _store_prepared(source_path, graph):
 _GRAPH_MEMORY = {}
 
 
+def _graph_area(path):
+    """(lat, lon, dosah km) ulozeneho grafu - z nazvu souboru."""
+    _, lat, lon, reach = path.stem.split("_")
+    return float(lat), float(lon), float(reach.removesuffix("km"))
+
+
 def load_walk_graph(lat, lon, reach_km):
     """Pesi graf OSM pokryvajici kruh (start, reach), pripraveny k planovani.
 
     Prvni stazeni z Overpass trva minuty; stahuje se velkoryse (min. 10 km).
     Dalsi volani berou graf z pameti procesu, jinak z pickle cache (~4 s),
-    a teprve nakonec z graphml (~28 s vcetne pripravy)."""
+    a teprve nakonec z graphml (~28 s vcetne pripravy).
+
+    Graf, kteremu pri priprave vypadl zdroj (ulice, znacene trasy), zustava
+    v pameti, ale pri kazdem dalsim nacteni se ho zkusi doplnit - a do cache
+    se ulozi, az kdyz je uplny. Pri trvajicim vypadku pokus nezdrzi (modul
+    overpass po selhani chvili nic nezkousi). Kdyz nejde stahnout ani graf
+    sam, vyhazuje GraphUnavailable."""
     import osmnx as ox
 
     path = covering_graph_path(lat, lon, reach_km)
     if path is None:
         download_reach = max(reach_km, MIN_DOWNLOAD_REACH_KM)
         ox.settings.cache_folder = str(GRAPH_DIR / "osmnx_cache")
-        # network_type="walk" zustava kvuli obousmernosti (jednosmerky se
-        # probehnou obema smery); ktere cesty graf obsahuje, urcuje WALK_FILTERS.
-        graph = ox.graph_from_point(
-            (lat, lon), dist=download_reach * 1000, network_type="walk",
-            custom_filter=WALK_FILTERS, simplify=True,
-        )
+        # osmnx sam zkousi jen hlavni server a pri 504 opakuje donekonecna
+        overpass.install_for_osmnx()
+        try:
+            # network_type="walk" zustava kvuli obousmernosti (jednosmerky se
+            # probehnou obema smery); ktere cesty graf obsahuje, urcuje WALK_FILTERS.
+            graph = ox.graph_from_point(
+                (lat, lon), dist=download_reach * 1000, network_type="walk",
+                custom_filter=WALK_FILTERS, simplify=True,
+            )
+        except Exception as error:
+            raise GraphUnavailable(
+                f"Pesi graf okoli {lat:.3f}, {lon:.3f} se nepodarilo stahnout: {error}"
+            ) from error
         path = graph_path(lat, lon, download_reach)
         ox.save_graphml(graph, path)
         _, complete = _prepare(graph, lat, lon, download_reach)
@@ -285,7 +320,14 @@ def load_walk_graph(lat, lon, reach_km):
             if complete:
                 _store_prepared(path, graph)
         _GRAPH_MEMORY[str(path)] = graph
-    return _GRAPH_MEMORY[str(path)]
+        return graph
+
+    graph = _GRAPH_MEMORY[str(path)]
+    if not graph.graph.get("sources_complete", True):
+        graph, complete = _prepare(graph, *_graph_area(path))
+        if complete:
+            _store_prepared(path, graph)
+    return graph
 
 
 _NODE_INDEX_CACHE = {}

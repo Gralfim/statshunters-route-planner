@@ -117,3 +117,20 @@ def test_every_category_has_an_icon_and_label():
     for key, _filter, zoom, label, icon in CATEGORIES:
         assert label and icon, key
         assert 10 <= zoom <= 18, key
+
+
+def test_a_failed_download_is_not_remembered(tmp_path, monkeypatch):
+    """Drive se chyba spolkla a do cache se zapsal prazdny seznam - vrstva
+    bodu pak v cele oblasti zustala prazdna natrvalo."""
+    import overpass
+    import pois
+
+    def down(_query):
+        raise overpass.OverpassUnavailable("vsechna zrcadla 504")
+
+    monkeypatch.setattr(pois, "POI_DIR", tmp_path)
+    monkeypatch.setattr(overpass, "query", down)
+    monkeypatch.setattr(pois, "_MEMORY", {})
+    assert pois.load_pois(50.07, 14.42, 10) == []
+    assert list(tmp_path.iterdir()) == []
+    assert pois._MEMORY == {}

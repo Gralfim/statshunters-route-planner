@@ -7,9 +7,9 @@ cachuje stejne velkoryse jako pesi graf (pokryti + rezerva).
 import json
 import math
 import sys
-import urllib.parse
-import urllib.request
 from pathlib import Path
+
+import overpass
 
 ROOT = Path(__file__).resolve().parents[1]
 BARRIER_DIR = ROOT / "data"
@@ -27,11 +27,7 @@ STREET_CLASSES = [
 MAJOR_STREET_CLASSES = {"primary", "secondary", "tertiary"}
 
 # Znacene trasy (KCT, cyklotrasy) jsou v OSM relace - osmnx features je nevraci,
-# proto primy dotaz na Overpass.
-OVERPASS_MIRRORS = (
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-)
+# proto primy dotaz na Overpass (pres overpass.query - zrcadla, kratke cekani).
 
 
 class SourceUnavailable(Exception):
@@ -137,6 +133,8 @@ def _features(ox, lat, lon, dist, tags):
     """
     from osmnx._errors import InsufficientResponseError
 
+    # osmnx sam zkousi jen hlavni server a pri 504 opakuje donekonecna
+    overpass.install_for_osmnx()
     try:
         return ox.features_from_point((lat, lon), tags=tags, dist=dist)
     except InsufficientResponseError:
@@ -206,21 +204,13 @@ def _trail_label(tags):
 
 
 def _overpass(query):
-    """Odpoved Overpassu, nebo vyjimka. Zkousi se vic zrcadel: hlavni server
-    pod zatezi vraci 504 a jedno selhani nesmi pripravit trasu o znacky."""
-    last = None
-    for url in OVERPASS_MIRRORS:
-        try:
-            request = urllib.request.Request(
-                url,
-                data=urllib.parse.urlencode({"data": query}).encode(),
-                headers={"User-Agent": "statshunters-route-planner"},
-            )
-            with urllib.request.urlopen(request, timeout=240) as response:
-                return json.load(response).get("elements", [])
-        except Exception as error:      # 504, timeout, docasny vypadek zrcadla
-            last = error
-    raise SourceUnavailable(f"Overpass neodpovedel ({last})") from last
+    """Odpoved Overpassu, nebo vyjimka. Zrcadla a casove limity resi modul
+    overpass: hlavni server pod zatezi vraci 504 a jedno selhani nesmi pripravit
+    trasu o znacky."""
+    try:
+        return overpass.query(query)
+    except overpass.OverpassUnavailable as error:
+        raise SourceUnavailable(f"Overpass neodpovedel ({error})") from error
 
 
 def build_trails(lat, lon, reach_km):
@@ -264,6 +254,8 @@ _CACHE_MEMORY = {}
 
 
 def _load_cached(prefix, builder, lat, lon, reach_km):
+    """Data zdroje z cache, nebo stazena. None = zdroj vypadl - odlisne od
+    prazdneho seznamu ("v okoli nic neni"), aby volajici poznal neuplna data."""
     path = _covering_cache_path(prefix, lat, lon, reach_km)
     if path is None:
         try:
@@ -272,7 +264,7 @@ def _load_cached(prefix, builder, lat, lon, reach_km):
             # Planovani pokracuje bez tohoto zdroje, ale nezapamatuje si to -
             # ani na disk, ani do pameti. Priste se zkusi znovu.
             print(f"VAROVANI: {prefix} se nepodarilo stahnout: {error}", file=sys.stderr)
-            return []
+            return None
         _CACHE_MEMORY[str(_cache_path(prefix, lat, lon, max(reach_km, MIN_DOWNLOAD_REACH_KM)))] = data
         return data
     if str(path) not in _CACHE_MEMORY:
@@ -281,14 +273,17 @@ def _load_cached(prefix, builder, lat, lon, reach_km):
 
 
 def load_barriers(lat, lon, reach_km):
-    return _load_cached("barriers", build_barriers, lat, lon, reach_km)
+    # orientacni body v itinerari jsou doplnek - bez nich se planuje dal
+    return _load_cached("barriers", build_barriers, lat, lon, reach_km) or []
 
 
 def load_streets(lat, lon, reach_km):
+    """Pojmenovane ulice, nebo None, kdyz zdroj vypadl."""
     return _load_cached("streets", build_streets, lat, lon, reach_km)
 
 
 def load_trails(lat, lon, reach_km):
+    """Znacene trasy, nebo None, kdyz zdroj vypadl."""
     return _load_cached(TRAILS_CACHE, build_trails, lat, lon, reach_km)
 
 

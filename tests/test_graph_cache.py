@@ -129,3 +129,54 @@ def test_pickle_keeps_the_street_index(fake_graphml, line_graph):
     segments = waygraph._load_prepared(fake_graphml).graph["street_segments"]
     assert segments[3][0] == "Jecna"
     assert bool(segments[4][0]) is True
+
+
+# --- vypadek zdroje pri priprave grafu ---
+
+def _two_node_graph(line_graph):
+    return line_graph({1: (50.0, 14.0), 2: (50.001, 14.0)}, [(1, 2, {"highway": "footway"})])
+
+
+def test_graph_prepared_without_streets_is_incomplete(line_graph, monkeypatch):
+    """Drive se za neuplny povazoval jen graf bez znacenych tras. Bez ulic ale
+    chodniky nemaji jmeno ani priznak "podel rusne ulice" (meni se ceny hran
+    i itinerar) - a takovy graf se ulozil do cache natrvalo."""
+    import landmarks
+
+    graph = _two_node_graph(line_graph)
+    monkeypatch.setattr(landmarks, "load_streets", lambda *_args: None)
+    monkeypatch.setattr(landmarks, "load_trails", lambda *_args: [])
+    _graph, complete = waygraph._prepare(graph, 50.0, 14.0, 10)
+    assert not complete
+    assert graph.graph["sources_complete"] is False
+
+
+def test_an_empty_area_is_complete_unlike_an_outage(line_graph, monkeypatch):
+    """Prazdny seznam = v okoli nic neni (platny vysledek), None = vypadek."""
+    import landmarks
+
+    graph = _two_node_graph(line_graph)
+    monkeypatch.setattr(landmarks, "load_streets", lambda *_args: [])
+    monkeypatch.setattr(landmarks, "load_trails", lambda *_args: [])
+    _graph, complete = waygraph._prepare(graph, 50.0, 14.0, 10)
+    assert complete
+
+
+def test_incomplete_graph_in_memory_is_completed_and_cached_later(tmp_path, line_graph,
+                                                                 monkeypatch):
+    """Neuplny graf zustava v pameti; pri dalsim nacteni se zdroj zkusi znovu
+    a do cache se graf ulozi, az kdyz je uplny."""
+    import landmarks
+
+    path = tmp_path / f"{waygraph.GRAPH_PREFIX}_50.000_14.000_10.0km.graphml"
+    path.write_text("", encoding="utf-8")
+    graph = _two_node_graph(line_graph)
+    graph.graph["sources_complete"] = False
+    monkeypatch.setattr(waygraph, "GRAPH_DIR", tmp_path)
+    monkeypatch.setattr(waygraph, "_GRAPH_MEMORY", {str(path): graph})
+    monkeypatch.setattr(landmarks, "load_streets", lambda *_args: [])
+    monkeypatch.setattr(landmarks, "load_trails", lambda *_args: [])
+
+    assert waygraph.load_walk_graph(50.0, 14.0, 5) is graph
+    assert graph.graph["sources_complete"] is True
+    assert waygraph._load_prepared(path) is not None

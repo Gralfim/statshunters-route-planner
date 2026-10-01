@@ -103,6 +103,7 @@ resp. `/api/expedition`).
 | `src/transit.py` | síť MHD z PID GTFS + router spojení (min. přestupů, priorita druhů) |
 | `src/expedition.py` | výpravy: cílové oblasti, spojení tam/zpět, časový rozpočet |
 | `src/landmarks.py` | vodní toky a železnice (osmnx features) + geometrické křížení pro itinerář |
+| `src/overpass.py` | jediný přístup k Overpass API: zrcadla, krátké čekání na odpověď, žádné nekonečné opakování, pauza po výpadku; přesměrovává i dotazy osmnx |
 | `src/basemap.py` | podkladová mapa v UI — Mapy.cz turistická vrstva (API klíč), fallback na OSM |
 | `src/pois.py` | orientační body a občerstvení z OSM (vyhlídky, studánky, pitná voda, restaurace) s odstupňováním podle přiblížení |
 | `src/geojson.py` | převod tiles na GeoJSON polygony |
@@ -191,29 +192,27 @@ neobjeví — je potřeba smazat `data/pid_gtfs.zip` a `data/transit_graph.json`
 ### Barvy na mapě
 
 Každý navštívený tile se kreslí jednou, barvou podle toho, **kdy byl naposledy navštíven**
-(studená → teplá): modrá `#2a78d6` = před letoškem; **letošní tiles jsou odstupňované podle stáří
-poslední návštěvy**, tedy podle té složky ceny, podle které plánovač vybírá okruhy z domova
-(bonus za stáří, viz skóre níže):
+(studená → teplá): modrá `#2a78d6` = před letoškem; **letošní tiles mají spojitou škálu podle ceny
+za stáří poslední návštěvy**, tedy podle té složky ceny, podle které plánovač vybírá okruhy z domova
+(bonus za stáří, viz skóre níže). Měřítko je pevné — od ceny 0 (do 30 dní) po cenu po roce (0,695) —
+takže barva znamená totéž v lednu i v říjnu; většina změny barvy proběhne v prvních měsících, kde
+cena roste nejrychleji (3 měsíce 0,31, půl roku 0,50). Legenda je pruh s časovou osou (rok → 30 dní)
+a cenou, popup tile uvádí přesný počet dní a cenu. Stáří i cenu posílá API u každého tile
+(`days_since_visit`, `staleness`) a měřítko v `/api/summary` (`staleness_scale`) přímo ze `scoring`,
+aby mapa nikdy neukazovala jinou cenu, než s jakou počítá plánovač.
 
-| třída | barva | krytí | bonus za stáří |
-|---|---|---|---|
-| do 30 dní (`STALENESS_FRESH_DAYS`) | `#8e2e00` | 0,60 | 0 |
-| 1–3 měsíce | `#d74b01` | 0,45 | 0–0,31 |
-| starší letos | `#ff8d65` | 0,32 | 0,31+ |
-| před letoškem | `#2a78d6` | 0,32 | — |
-
-Stáří i bonus posílá API u každého tile (`days_since_visit`, `staleness`) přímo ze `scoring`,
-aby mapa nikdy neukazovala jinou cenu, než s jakou počítá plánovač; popup tile je uvádí. Tmavší =
-čerstvější navazuje na dřívější „červená = nedávno". Rampa je jeden odstín a prošla ordinálními
-kontrolami validátoru (monotónní světlost, krok ≥ 0,06, světlý konec 2,21 : 1 proti povrchu).
-**Krytí se stupňuje spolu s barvou**: dlaždice leží poloprůhledně přes podkladovou mapu a při
-jednotném krytí 0,32 vyšel rozdíl sousedních stupňů po smíchání s podkladem (zástavba, les, voda,
-bílá) jen ΔE 4,4 (cíl ≥ 8); s odstupňovaným 11,2, při barvosleposti 10,6. Nejstarší letošní stupeň
-má krytí jako dosud, takže mapa pod většinou dlaždic zůstává stejně čitelná. Nejslabší dvojice je
-nejstarší letošní stupeň proti modré (v nejhorším případě ΔE 7,3, pásmo, kde musí pomoct legenda
-a popup — proto oba uvádějí třídu i cenu). (Dřívější třetí, červená vrstva „poslední 3 měsíce"
-byla 09/2026 zrušena spolu s tím obdobím.) Barva období „letos" ve statistikách a v obrysech je
-prostřední stupeň rampy.
+Barva: jeden odstín (OKLCH, odstín 40), světlost 0,36 → 0,78, tmavší = čerstvější (navazuje na
+dřívější „červená = nedávno"); devět bodů škály prošlo ordinálními kontrolami validátoru (monotónní
+světlost, světlý konec 2,05 : 1 proti povrchu, jeden odstín), mezi nimi se interpoluje. **Krytí se
+mění spolu s barvou** (0,75 → 0,30): dlaždice leží poloprůhledně přes podkladovou mapu a rozdíly
+v barvě se smícháním zmenšují. Měřeno po smíchání s podkladem (zástavba, les, voda, bílá): pět bodů
+škály (0; 0,25; …; 1) je od sebe aspoň **ΔE 8,1** (při barvosleposti 7,5 — přesnou hodnotu dává
+popup). Původní tři třídy se stejným krytím 0,32 měly mezi sebou jen ΔE 4,4. Širší rozsah světlosti
+by rozlišení zlepšil, ale nejstarší letošní dlaždice by splývala s nenavštívenou (a světlý konec by
+neprošel kontrastem 2 : 1). Ověřeno i ve skutečném prohlížeči (headless Edge): kolem Prahy je vidět
+víc než pět rozlišitelných odstínů. (Dřívější třetí, červená vrstva „poslední 3 měsíce" byla 09/2026
+zrušena spolu s tím obdobím.) Barva období „letos" ve statistikách a v obrysech je střed škály
+`#c94500`.
 
 Doporučené tiles: fialová výplň `#4a3aa7` u dosud nenavštívených; doporučení na už navštíveném tile
 má jen tmavý obrys bez výplně, aby nepřekrylo barvu jeho stáří (tu informaci nese sám tile). Obrysy max
@@ -694,6 +693,30 @@ Jak to funguje:
      úplnosti). Raději pomalá příprava pokaždé než tiše horší výsledky. „V okolí nic
      není" se od výpadku odlišuje: osmnx to hlásí `InsufficientResponseError` a to je
      platný výsledek, který se cachovat smí.
+
+     **Výpadek Overpassu (10/2026).** Hlavní server na dotazy vracel 504, zrcadla
+     neodpovídala vůbec, a ukázaly se čtyři vady:
+     1. **osmnx 2.1 při 504/429 čeká 55 s a zkouší znovu bez omezení** počtu pokusů;
+        když se k serveru nedá připojit, čeká 60 s „pauzu" a pak až 180 s na spojení.
+        Plánování v nové oblasti se mohlo zaseknout na neurčito.
+     2. Ulice, vodní toky, orientační body i pěší graf šly **jen na hlavní server**;
+        zrcadla zkoušely jen značené trasy.
+     3. **Graf připravený bez ulic se uložil do cache jako hotový** — za neúplný se
+        považoval jen při výpadku značených tras. Chodníky pak natrvalo neměly jméno
+        ani příznak „podél rušné ulice", takže se měnily ceny hran i itinerář.
+     4. **Výpadek orientačních bodů se zapsal do cache jako prázdný seznam** — vrstva
+        bodů zůstala v celé oblasti prázdná natrvalo.
+
+     Oprava: všechny dotazy (i ty z osmnx — jeho interní dotazovací funkce se jednou
+     trvale nahradí) jdou přes `src/overpass.py`. Zrcadla po řadě, každé nejdřív
+     krátkým dotazem na `/status` (10 s), 5xx/429 = další zrcadlo; odpověď 200
+     s poznámkou „runtime error" (Overpass tak vrací **neúplná** data při vypršení
+     času) se nepřijme. Když selžou všechna, 5 minut se nic nezkouší — výprava by jinak
+     čekala na každý zdroj každé oblasti zvlášť; pamatuje se jen čas selhání, ne data.
+     Výpadek zdroje vrací `None` (ne prázdný seznam), graf bez ulic či značek se
+     neuloží a při dalším plánování se ho zkusí doplnit. Když nejde stáhnout ani
+     pěší graf nové oblasti, výprava cíl přeskočí (`GraphUnavailable`) a plánování
+     okruhu vrátí 503 místo chyby serveru.
    - **Rozcestí**: na **neznačených polních cestách a pěšinách** se hlásí každé
      rozcestí s kilometráží a pokynem „drž se vlevo/vpravo" (tam hrozí navigační
      chyba). Na chodnících v zástavbě se nehlásí (byly by desítky na kilometr)
@@ -759,6 +782,7 @@ pytest -m slow         # kontrolní měření na skutečném grafu Prahy (~1 min
 | `tests/test_square_progress.py` | strategický postup: dokončené okno se nepočítá jako postup (to je zisk), víc doplněných dlaždic je víc, postup nikdy nepřebije skutečné dokončení, hodnota okna odpovídá váze priority |
 | `tests/test_corridor.py` | opakovaný koridor: rovná trasa nic nehlásí, tam-a-zpět počítá oba průchody, **souběžná pěšina se počítá, i když se neopakuje žádná hrana**, vzdálenější ulice ne, ohyb ani krátký slepý ocásek ne |
 | `tests/test_transit_schedule.py` | jízdní řád z GTFS: varianta z jiného období nenafoukne interval, linku popisuje ta varianta, která opravdu jede, zkrácený spoj se nestane tváří linky, výjimky z `calendar_dates.txt`, expirace feedu a platnost cache grafu |
+| `tests/test_overpass.py` | výpadek Overpassu: 504 → další zrcadlo, mrtvé zrcadlo se přeskočí bez dotazu, neúplná odpověď („runtime error") se nepřijme, po selhání všech pauza, osmnx už neopakuje donekonečna a jeho cache dál platí |
 | `tests/test_trails.py` | značené trasy: plánovaná i „doporučená" cyklotrasa se zahodí, existující přežije i s dírou (`complete=no`), turistických se filtr netýká; selhání stahování se nezapamatuje (disk ani paměť) a zkusí se všechna zrcadla |
 | `tests/test_objective.py` | cílová funkce: skóre nikdy nepřeroste přínos ani nespadne pod nulu, symetrie penalizace délky, váha klidu i značené trasy umí přehodit vítěze; výběr variant (vítěz první, skoro stejné se sloučí) |
 

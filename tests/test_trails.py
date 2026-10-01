@@ -49,31 +49,50 @@ def test_trails_cache_name_stays_parsable():
 def test_a_failed_download_is_not_remembered(tmp_path, monkeypatch):
     """Jedno 504 od Overpassu drive pripravilo celou oblast o znacene trasy
     natrvalo: chyba se spolkla a do cache se zapsal prazdny seznam. Protoze
-    znacka zlevnuje hrany, zmenilo to i navrzenou trasu."""
+    znacka zlevnuje hrany, zmenilo to i navrzenou trasu. Vypadek je None - ne
+    prazdny seznam, ktery znamena "v okoli nic neni"."""
+    import overpass
+
+    def down(_query):
+        raise overpass.OverpassUnavailable("vsechna zrcadla 504")
+
     monkeypatch.setattr(landmarks, "BARRIER_DIR", tmp_path)
-    monkeypatch.setattr(landmarks, "OVERPASS_MIRRORS", ("https://127.0.0.1:1/nope",))
+    monkeypatch.setattr(overpass, "query", down)
     monkeypatch.setattr(landmarks, "_CACHE_MEMORY", {})
 
-    assert landmarks.load_trails(50.05, 14.41, 12) == []
+    assert landmarks.load_trails(50.05, 14.41, 12) is None
     assert list(tmp_path.iterdir()) == []          # nic se nezapsalo
     assert landmarks._CACHE_MEMORY == {}           # ani do pameti
 
 
-def test_every_mirror_is_tried_before_giving_up(monkeypatch):
-    tried = []
+def test_overpass_outage_is_reported_as_source_unavailable(monkeypatch):
+    """Zrcadla zkousi modul overpass (tests/test_overpass.py); landmarks jen
+    prevadi jeho selhani na svou vyjimku, aby se neuplny vysledek neulozil."""
+    import overpass
 
-    def fail(request, timeout=None):
-        tried.append(request.full_url)
-        raise OSError("504")
+    def down(_query):
+        raise overpass.OverpassUnavailable("vsechna zrcadla 504")
 
-    monkeypatch.setattr(landmarks.urllib.request, "urlopen", fail)
+    monkeypatch.setattr(overpass, "query", down)
     try:
         landmarks._overpass("out;")
     except landmarks.SourceUnavailable:
         pass
     else:
         raise AssertionError("melo vyhodit SourceUnavailable")
-    assert tried == list(landmarks.OVERPASS_MIRRORS)
+
+
+def test_barriers_outage_leaves_the_itinerary_without_landmarks(tmp_path, monkeypatch):
+    """Orientacni body jsou doplnek - itinerar je dostane prazdne, ale nic se
+    neulozi."""
+    def down(*_args):
+        raise landmarks.SourceUnavailable("504")
+
+    monkeypatch.setattr(landmarks, "BARRIER_DIR", tmp_path)
+    monkeypatch.setattr(landmarks, "build_barriers", down)
+    monkeypatch.setattr(landmarks, "_CACHE_MEMORY", {})
+    assert landmarks.load_barriers(50.05, 14.41, 12) == []
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_an_empty_area_is_a_valid_result_not_a_failure(monkeypatch):

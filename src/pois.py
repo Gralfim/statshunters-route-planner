@@ -15,15 +15,15 @@ rezerva), takze druhy dotaz v okoli uz je z disku.
 """
 import json
 import math
-import urllib.parse
-import urllib.request
+import sys
 from pathlib import Path
+
+import overpass
 
 ROOT = Path(__file__).resolve().parents[1]
 POI_DIR = ROOT / "data"
 COVER_SLACK_KM = 1.5
 MIN_DOWNLOAD_REACH_KM = 10
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
 EARTH_RADIUS_M = 6371000.0
 
@@ -91,7 +91,11 @@ def _min_zoom(category, base_zoom, tags):
 
 
 def build_pois(lat, lon, reach_km):
-    """Stahne body z Overpass. Prvni dotaz pro Prahu trva desitky sekund."""
+    """Stahne body z Overpass. Prvni dotaz pro Prahu trva desitky sekund.
+
+    Pri vypadku Overpassu vyhazuje overpass.OverpassUnavailable a nic neulozi.
+    Drive se chyba spolkla a do cache se zapsal prazdny seznam - vrstva bodu
+    pak v cele oblasti zustala prazdna natrvalo."""
     dist = int(max(reach_km, MIN_DOWNLOAD_REACH_KM) * 1000)
     parts = "".join(
         f"node{osm_filter}(around:{dist},{lat},{lon});"
@@ -100,19 +104,7 @@ def build_pois(lat, lon, reach_km):
     )
     query = f"[out:json][timeout:180];({parts});out center tags;"
 
-    points = []
-    try:
-        request = urllib.request.Request(
-            OVERPASS_URL,
-            data=urllib.parse.urlencode({"data": query}).encode(),
-            headers={"User-Agent": "statshunters-route-planner"},
-        )
-        with urllib.request.urlopen(request, timeout=240) as response:
-            elements = json.load(response).get("elements", [])
-        points = _classify(elements)
-    except Exception:
-        points = []
-
+    points = _classify(overpass.query(query))
     path = _cache_path(lat, lon, max(reach_km, MIN_DOWNLOAD_REACH_KM))
     path.write_text(json.dumps(points, ensure_ascii=False), encoding="utf-8")
     return points
@@ -184,7 +176,11 @@ _MEMORY = {}
 def load_pois(lat, lon, reach_km):
     path = _covering_cache_path(lat, lon, reach_km)
     if path is None:
-        data = build_pois(lat, lon, reach_km)
+        try:
+            data = build_pois(lat, lon, reach_km)
+        except overpass.OverpassUnavailable as error:
+            print(f"VAROVANI: orientacni body se nepodarilo stahnout: {error}", file=sys.stderr)
+            return []
         _MEMORY[str(_cache_path(lat, lon, max(reach_km, MIN_DOWNLOAD_REACH_KM)))] = data
         return data
     if str(path) not in _MEMORY:
